@@ -17,28 +17,31 @@ const REQUIRED_KEYS: &[&str] = &[
 	"art_history_showing_all",
 	"art_history_showing_count",
 	"channel_not_allowed",
-	"channel_patterns_empty",
+	"channel_tag_blocked",
+	"command_not_registered",
 	"could_not_find_image",
 	"custom_command_description",
 	"custom_command_no_tags",
 	"custom_tag_option_description",
 	"pattern_command_description",
 	"reload_toml_already_in_progress",
-	"reload_toml_command_description",
 	"reload_toml_finished",
 	"reload_toml_in_progress",
 	"reload_toml_waiting",
 	"required_tag_option_description",
 	"server_not_validated",
+	"tag_not_registered",
 ];
 
 const REQUIRED_PLACEHOLDERS: &[(&str, &[&str])] = &[
 	("art_history_error", &["error"]),
 	("art_history_showing_all", &["requested", "shown"]),
 	("art_history_showing_count", &["shown"]),
+	("channel_tag_blocked", &["tag"]),
 	("could_not_find_image", &["error"]),
 	("custom_command_description", &["booru"]),
 	("pattern_command_description", &["pattern"]),
+	("tag_not_registered", &["tag"]),
 ];
 
 fn main() {

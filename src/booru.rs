@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rand::RngExt;
-use reqwest::{header::HeaderName, Client, Response};
+use reqwest::{Client, Response, header::HeaderName};
 use serde_json::Value;
 
 use crate::cli;
@@ -13,6 +13,7 @@ mod helpers;
 
 use helpers::*;
 
+#[derive(Clone)]
 pub struct ImageResult {
 	pub image_url: String,
 	pub post_url: Option<String>,
@@ -59,26 +60,33 @@ impl BooruClient {
 			booru.tag_spaces_as_plus,
 		);
 
-		let count_url = fill_template(
-			booru,
-			&self.runtime_values,
-			&booru.count_url,
-			&encoded_tags,
-			None,
-			booru.page_size,
-		);
-		self.pacer.wait().await;
-		let count_json = self.request_json(booru, &count_url, "count").await?;
+		let count = if let Some(ref count_url) = booru.count_url {
+			let count_url = fill_template(
+				booru,
+				&self.runtime_values,
+				count_url,
+				&encoded_tags,
+				None,
+				booru.page_size,
+			);
+			self.pacer.wait().await;
+			let count_json = self.request_json(booru, &count_url, "count").await?;
 
-		let count = read_u64_path(&count_json, &booru.count_path)
-			.with_context(|| format!("failed to read count for {}", booru.name))?;
+			read_u64_path(&count_json, &booru.count_path)
+				.with_context(|| format!("failed to read count for {}", booru.name))?
+		} else {
+			0
+		};
 
-		if count == 0 {
-			bail!("{} has no posts for tags: {}", booru.name, tags.join(" "));
-		}
-
-		let page_count = count.div_ceil(booru.page_size);
-		let random_page = rand::rng().random_range(0..page_count) + booru.page_base;
+		let random_page = if count == 0 && booru.count_url.is_none() {
+			booru.page_base
+		} else {
+			if count == 0 {
+				bail!("{} has no posts for tags: {}", booru.name, tags.join(" "));
+			}
+			let page_count = count.div_ceil(booru.page_size);
+			rand::rng().random_range(0..page_count) + booru.page_base
+		};
 		cli::booru_random("page", random_page);
 		let posts_url = fill_template(
 			booru,

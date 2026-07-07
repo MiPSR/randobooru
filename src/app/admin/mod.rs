@@ -1,16 +1,22 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serenity::all::CommandInteraction;
 
-mod booru;
+pub(crate) mod booru;
+#[allow(dead_code)]
 mod moderator;
+#[allow(dead_code)]
 mod parameters;
+#[allow(dead_code)]
 mod server;
+#[allow(dead_code)]
 mod setting;
+#[allow(dead_code)]
 mod tag_patterns;
-mod tags;
+pub(crate) mod tags;
 
 use super::Handler;
 
+#[allow(dead_code)]
 pub(crate) async fn execute_admin_action(
 	handler: &Handler,
 	action: &str,

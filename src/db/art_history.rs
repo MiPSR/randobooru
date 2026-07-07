@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Row};
+use rusqlite::{Row, params};
 
 use super::Database;
 

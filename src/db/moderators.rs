@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::params;
 
 use super::Database;
@@ -56,7 +56,9 @@ impl Database {
 	pub fn is_moderator(&self, user_id: i64, guild_id: Option<i64>) -> Result<bool> {
 		let conn = self.connection();
 		let mut stmt = conn
-			.prepare("SELECT COUNT(*) FROM moderators WHERE user_id = ?1 AND (guild_id IS NULL OR guild_id IS ?2)")
+			.prepare(
+				"SELECT COUNT(*) FROM moderators WHERE user_id = ?1 AND (guild_id IS NULL OR guild_id IS ?2)",
+			)
 			.context("failed to prepare is_moderator query")?;
 		let count: i64 = stmt
 			.query_row(params![user_id, guild_id], |row| row.get(0))

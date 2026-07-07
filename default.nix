@@ -2,7 +2,7 @@
 
 pkgs.pkgsStatic.rustPlatform.buildRustPackage {
 	pname = "randobooru";
-	version = "0.1.0";
+	version = "26.1.1-alpha";
 	src = ./.;
 
 	cargoLock.lockFile = ./Cargo.lock;

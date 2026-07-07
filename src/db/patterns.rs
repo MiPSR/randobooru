@@ -1,5 +1,5 @@
-use anyhow::{bail, Context, Result};
-use rusqlite::{params, Row};
+use anyhow::{Context, Result, bail};
+use rusqlite::{Row, params};
 
 use super::Database;
 
@@ -186,6 +186,7 @@ impl Database {
 		Ok(names)
 	}
 
+	#[allow(dead_code)]
 	pub fn count_enabled_pattern_commands(&self) -> Result<usize> {
 		let count: i64 = self
 			.connection()

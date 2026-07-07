@@ -17,7 +17,7 @@ pub struct BooruConfig {
 	pub encode_tag_separator: bool,
 	pub tag_spaces_as_plus: bool,
 	pub character_space_replacement: String,
-	pub count_url: String,
+	pub count_url: Option<String>,
 	pub count_path: Vec<JsonPathSegment>,
 	pub posts_url: String,
 	pub posts_path: Vec<JsonPathSegment>,
@@ -128,6 +128,7 @@ impl BooruConfig {
 			encode_tag_separator: self.encode_tag_separator,
 			tag_spaces_as_plus: self.tag_spaces_as_plus,
 			character_space_replacement: self.character_space_replacement.clone(),
+			description: String::new(),
 			count_url: self.count_url.clone(),
 			count_path_json: serde_json::to_string(&self.count_path)
 				.context("failed to serialize count_path")?,
@@ -169,7 +170,7 @@ mod tests {
 			encode_tag_separator: true,
 			tag_spaces_as_plus: false,
 			character_space_replacement: "_".to_string(),
-			count_url: "https://example.test/count?tags={tags}".to_string(),
+			count_url: Some("https://example.test/count?tags={tags}".to_string()),
 			count_path: vec![],
 			posts_url: "https://example.test/posts?tags={tags}&page={page}&limit={limit}"
 				.to_string(),

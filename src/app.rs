@@ -2,21 +2,22 @@ use std::{
 	collections::HashMap,
 	env,
 	sync::{
-		atomic::{AtomicBool, Ordering},
 		Arc, Mutex,
+		atomic::{AtomicBool, Ordering},
 	},
 	time::Duration,
 };
 
 use anyhow::{Context as _, Result};
 use serenity::{
+	Client,
 	all::{
 		ApplicationId, CommandInteraction, CommandOptionType, Context, CreateCommand,
-		CreateCommandOption, EventHandler, GatewayIntents, Interaction, Ready, ResolvedValue,
+		CreateCommandOption, CreateMessage, EventHandler, GatewayIntents, Interaction, Ready,
+		ResolvedValue, UserId,
 	},
 	async_trait,
 	http::GuildPagination,
-	Client,
 };
 use tokio::sync::Notify;
 
@@ -30,12 +31,14 @@ use crate::{
 };
 
 mod admin;
+mod admin_embed;
 mod commands;
+mod post_cache;
 mod responses;
 mod secrets;
 
-pub(crate) use admin::execute_admin_action;
 pub(crate) use commands::JobTracker;
+pub(crate) use post_cache::PostCache;
 pub(crate) use responses::{custom_command_name, discord_name_component};
 pub(crate) use secrets::SecretConfig;
 
@@ -51,6 +54,58 @@ pub struct Handler {
 	jobs: Arc<JobTracker>,
 	reload_requested: Arc<AtomicBool>,
 	reload_notify: Arc<Notify>,
+	shutdown_complete: Arc<Notify>,
+	cached_posts: Arc<PostCache>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ErrorSeverity {
+	Error,
+	Bug,
+}
+
+impl ErrorSeverity {
+	fn label(self) -> &'static str {
+		match self {
+			ErrorSeverity::Error => "ERROR",
+			ErrorSeverity::Bug => "BUG",
+		}
+	}
+}
+
+pub(crate) async fn report_error(
+	ctx: &Context,
+	owner: UserId,
+	severity: ErrorSeverity,
+	context: &str,
+	summary: &str,
+	details: Option<&str>,
+) {
+	cli::error(summary, severity.label());
+	let mut body = format!(
+		"**{label}** in `{ctx}`\n{summary}",
+		label = severity.label(),
+		ctx = truncate_for_dm(context, 200),
+		summary = truncate_for_dm(summary, 1500),
+	);
+	if let Some(details) = details {
+		body.push_str("\n```\n");
+		body.push_str(&truncate_for_dm(details, 1500));
+		body.push_str("\n```");
+	}
+	let _ = owner
+		.direct_message(&ctx.http, CreateMessage::new().content(body))
+		.await;
+}
+
+fn truncate_for_dm(value: &str, max: usize) -> String {
+	if value.chars().count() <= max {
+		value.to_string()
+	} else {
+		let mut out: String = value.chars().take(max.saturating_sub(3)).collect();
+		out.push_str("...");
+		out
+	}
 }
 
 pub(crate) fn command_string_option(command: &CommandInteraction, name: &str) -> Option<String> {
@@ -105,12 +160,11 @@ impl Handler {
 		};
 
 		let db = self.db.lock().expect("db mutex poisoned");
-		if let Ok(Some(cfg)) = db.get_channel_config(guild_id, channel_id) {
-			if let Some(ref lang) = cfg.language {
-				if let Some(i18n) = self.i18ns.get(lang) {
-					return i18n.clone();
-				}
-			}
+		if let Ok(Some(cfg)) = db.get_channel_config(guild_id, channel_id)
+			&& let Some(ref lang) = cfg.language
+			&& let Some(i18n) = self.i18ns.get(lang)
+		{
+			return i18n.clone();
 		}
 		(*self.i18n).clone()
 	}
@@ -146,11 +200,12 @@ impl Handler {
 			match self.booru.inline_image(booru, &image.image_url).await {
 				Ok(inline_image) => {
 					responses::log_final_selection(image, &inline_image);
-					let _ = responses::edit_interaction_with_inline_image(
+					let _ = responses::edit_interaction_with_inline_image_dm(
 						http,
 						&self.pacer,
-						booru,
+						&self.cached_posts,
 						command,
+						booru,
 						image,
 						inline_image,
 					)
@@ -172,11 +227,13 @@ impl Handler {
 				image.upstream_source_url.as_deref(),
 				&image.image_url,
 			);
-			let _ = responses::edit_interaction(
+			let _ = responses::edit_interaction_with_dm(
 				http,
 				&self.pacer,
+				&self.cached_posts,
 				command,
-				responses::format_image_response(booru, image, false),
+				booru,
+				image,
 			)
 			.await;
 		}
@@ -251,14 +308,20 @@ fn build_commands(
 	db: &Database,
 	i18n: &I18n,
 	server_validated: bool,
+	guild_id: Option<i64>,
 ) -> Result<Vec<CreateCommand>> {
 	let mut commands = Vec::new();
 
 	if server_validated {
 		let boorus = db.get_enabled_boorus()?;
 		for booru in &boorus {
+			let description = if booru.description.is_empty() {
+				booru.name.clone()
+			} else {
+				booru.description.clone()
+			};
 			let cmd = CreateCommand::new(custom_command_name(&booru.name))
-				.description(i18n.custom_command_description(&booru.name))
+				.description(description)
 				.add_option(
 					CreateCommandOption::new(
 						CommandOptionType::String,
@@ -287,8 +350,18 @@ fn build_commands(
 			commands.push(cmd);
 		}
 
+		let whitelisted = match guild_id {
+			Some(gid) => db.get_server_tags(gid)?,
+			None => Vec::new(),
+		};
+		let whitelisted_set: std::collections::HashSet<String> =
+			whitelisted.iter().cloned().collect();
+
 		let pattern_names = db.get_unique_pattern_names()?;
 		for name in &pattern_names {
+			if !whitelisted_set.contains(name) {
+				continue;
+			}
 			let booru_ids = db.get_booru_ids_for_pattern(name)?;
 			let enabled_count = booru_ids.iter().try_fold(0usize, |count, &id| {
 				let booru = db.get_booru_by_id(id)?;
@@ -316,21 +389,10 @@ fn build_commands(
 					.min_int_value(1),
 				),
 		);
-		commands
-			.push(CreateCommand::new("reload").description(i18n.reload_toml_command_description()));
 	}
 
 	commands.push(
-		CreateCommand::new("administrate")
-			.description(i18n.administrate_command_description())
-			.add_option(
-				CreateCommandOption::new(
-					CommandOptionType::String,
-					"action",
-					i18n.administrate_action_description(),
-				)
-				.required(true),
-			),
+		CreateCommand::new("administrate").description(i18n.administrate_command_description()),
 	);
 	Ok(commands)
 }
@@ -352,7 +414,7 @@ async fn register_commands_for_servers(
 			guilds.len(),
 			validated_servers.len(),
 			db.count_channels()?,
-			db.count_enabled_pattern_commands()?,
+			db.count_server_tag_whitelist()?,
 		);
 	}
 
@@ -365,10 +427,11 @@ async fn register_commands_for_servers(
 	for guild in &guilds {
 		let commands = {
 			let db = db.lock().expect("db mutex poisoned");
+			let guild_id = guild.id.get() as i64;
 			let server_validated = db
-				.get_server(guild.id.get() as i64)?
+				.get_server(guild_id)?
 				.is_some_and(|server| server.validated);
-			build_commands(&db, i18n, server_validated)?
+			build_commands(&db, i18n, server_validated, Some(guild_id))?
 		};
 		guild.id.set_commands(http, commands).await?;
 	}
@@ -419,16 +482,34 @@ pub(crate) async fn run() -> Result<()> {
 	let secrets = secrets::parse()?;
 	let db_path = "randobooru.sqlite3";
 
+	let mut is_reload = false;
 	loop {
-		if !run_bot(doctor, db_path, &secrets).await? || doctor {
+		if !run_bot(doctor, db_path, &secrets, is_reload).await? || doctor {
 			return Ok(());
 		}
+		is_reload = true;
 	}
 }
 
-async fn run_bot(_doctor: bool, db_path: &str, secrets: &SecretConfig) -> Result<bool> {
+async fn run_bot(
+	_doctor: bool,
+	db_path: &str,
+	secrets: &SecretConfig,
+	is_reload: bool,
+) -> Result<bool> {
+	if is_reload {
+		cli::bot_reloading();
+	} else {
+		cli::bot_loading();
+	}
+
 	let (language, api_rate_pace, fetch_retry_limit, history_limit, tag_blacklist, runtime_values) = {
 		let db = Database::open(db_path, 1000)?;
+		cli::checking_db();
+		let cleaned = db.check_and_clean()?;
+		if cleaned > 0 {
+			cli::db_cleaned(cleaned);
+		}
 		load_settings_from_db(&db, secrets)?
 	};
 
@@ -447,6 +528,8 @@ async fn run_bot(_doctor: bool, db_path: &str, secrets: &SecretConfig) -> Result
 	let jobs = Arc::new(JobTracker::new());
 	let reload_requested = Arc::new(AtomicBool::new(false));
 	let reload_notify = Arc::new(Notify::new());
+	let shutdown_complete = Arc::new(Notify::new());
+	let cached_posts = Arc::new(PostCache::new());
 
 	let handler = Handler {
 		db: Arc::clone(&db),
@@ -460,13 +543,14 @@ async fn run_bot(_doctor: bool, db_path: &str, secrets: &SecretConfig) -> Result
 		jobs,
 		reload_requested: Arc::clone(&reload_requested),
 		reload_notify: Arc::clone(&reload_notify),
+		shutdown_complete: Arc::clone(&shutdown_complete),
+		cached_posts: Arc::clone(&cached_posts),
 	};
 
 	let application_id = ApplicationId::new(secrets.discord_application_id);
 	let http = serenity::http::Http::new(&secrets.discord_token);
 	http.set_application_id(application_id);
 
-	cli::bot_reloaded();
 	register_commands_for_servers(&http, Arc::clone(&handler.db), &i18n).await?;
 
 	let intents = GatewayIntents::empty();
@@ -476,14 +560,35 @@ async fn run_bot(_doctor: bool, db_path: &str, secrets: &SecretConfig) -> Result
 		.await
 		.context("failed to create discord client")?;
 
+	let cache_cleanup = Arc::clone(&cached_posts);
+	let cache_cleanup_task = tokio::spawn(async move {
+		let mut interval = tokio::time::interval(Duration::from_secs(600));
+		loop {
+			interval.tick().await;
+			cache_cleanup.cleanup();
+		}
+	});
+
 	tokio::select! {
 		result = client.start() => {
+			cache_cleanup_task.abort();
 			result.context("discord client stopped")?;
 		}
-		_ = reload_notify.notified() => {}
+		_ = reload_notify.notified() => {
+			cache_cleanup_task.abort();
+			shutdown_complete.notified().await;
+			cli::unloaded_everything();
+		}
 	}
 
-	Ok(reload_requested.load(Ordering::Acquire))
+	let should_reload = reload_requested.load(Ordering::Acquire);
+	if should_reload {
+		cli::bot_reloaded();
+	} else {
+		cli::bot_loaded();
+	}
+
+	Ok(should_reload)
 }
 
 #[cfg(test)]
@@ -527,7 +632,7 @@ mod tests {
 			encode_tag_separator: true,
 			tag_spaces_as_plus: false,
 			character_space_replacement: "_".to_string(),
-			count_url: "https://test/count".to_string(),
+			count_url: Some("https://test/count".to_string()),
 			count_path: vec![],
 			posts_url: "https://test/posts".to_string(),
 			posts_path: vec![],

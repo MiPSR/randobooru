@@ -16,7 +16,8 @@ fn test_booru(name: &str) -> BooruRow {
 		encode_tag_separator: true,
 		tag_spaces_as_plus: false,
 		character_space_replacement: "_".to_string(),
-		count_url: "https://test/count?tags={tags}".to_string(),
+		description: String::new(),
+		count_url: Some("https://test/count?tags={tags}".to_string()),
 		count_path_json: "[]".to_string(),
 		posts_url: "https://test/posts?tags={tags}&page={page}&limit={limit}".to_string(),
 		posts_path_json: "[]".to_string(),
@@ -128,9 +129,11 @@ fn booru_custom_parameter_management() {
 
 	let parameters = db.get_booru_custom_parameters("demo").unwrap();
 	assert_eq!(parameters.len(), 2);
-	assert!(parameters
-		.iter()
-		.any(|p| p.key == "session" && p.value == "abc"));
+	assert!(
+		parameters
+			.iter()
+			.any(|p| p.key == "session" && p.value == "abc")
+	);
 
 	let all = db.get_all_booru_custom_parameters().unwrap();
 	assert_eq!(all.len(), 2);
@@ -145,16 +148,18 @@ fn booru_custom_parameter_management() {
 fn art_history_per_channel() {
 	let db = open_test_db();
 
-	assert!(db
-		.register_art("https://test/1", 100, Some(1), Some("demo"))
-		.unwrap());
+	assert!(
+		db.register_art("https://test/1", 100, Some(1), Some("demo"))
+			.unwrap()
+	);
 
 	assert!(db.art_history_exists("https://test/1", 100).unwrap());
 	assert!(!db.art_history_exists("https://test/1", 200).unwrap());
 
-	assert!(db
-		.register_art("https://test/1", 200, Some(1), Some("demo"))
-		.unwrap());
+	assert!(
+		db.register_art("https://test/1", 200, Some(1), Some("demo"))
+			.unwrap()
+	);
 	assert!(db.art_history_exists("https://test/1", 200).unwrap());
 
 	let recent_c100 = db.recent_art(100, 10).unwrap();
@@ -185,4 +190,23 @@ fn art_history_prune_per_channel() {
 	assert_eq!(recent[2].source_link, "https://test/c100/2");
 
 	assert!(db.recent_art(200, 10).unwrap().is_empty());
+}
+
+#[test]
+fn server_tag_whitelist_management() {
+	let db = open_test_db();
+	db.add_server(1, "test").unwrap();
+
+	assert!(db.get_server_tags(1).unwrap().is_empty());
+	assert_eq!(db.count_server_tag_whitelist().unwrap(), 0);
+
+	db.add_server_tag(1, "tag_a").unwrap();
+	db.add_server_tag(1, "tag_b").unwrap();
+	assert_eq!(db.count_server_tag_whitelist().unwrap(), 2);
+
+	let tags = db.get_server_tags(1).unwrap();
+	assert_eq!(tags, vec!["tag_a".to_string(), "tag_b".to_string()]);
+
+	db.remove_server_tag(1, "tag_a").unwrap();
+	assert_eq!(db.get_server_tags(1).unwrap(), vec!["tag_b".to_string()]);
 }

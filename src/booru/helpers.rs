@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
-use anyhow::{bail, Context, Result};
-use image::{codecs::jpeg::JpegEncoder, DynamicImage, Rgb, RgbImage, Rgba};
+use anyhow::{Context, Result, bail};
+use image::{DynamicImage, Rgb, RgbImage, Rgba, codecs::jpeg::JpegEncoder};
 use reqwest::Response;
 use serde_json::Value;
 
@@ -412,7 +412,7 @@ mod tests {
 			encode_tag_separator: true,
 			tag_spaces_as_plus: false,
 			character_space_replacement: "_".to_string(),
-			count_url: "https://example.test/count?tags={tags}".to_string(),
+			count_url: Some("https://example.test/count?tags={tags}".to_string()),
 			count_path: vec![JsonPathSegment::Key("count".to_string())],
 			posts_url: "https://example.test/posts?tags={tags}&page={page}&limit={limit}"
 				.to_string(),

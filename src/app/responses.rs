@@ -1,7 +1,11 @@
 use anyhow::Result;
-use serenity::all::{CommandInteraction, CreateAttachment, EditInteractionResponse};
+use serenity::all::{
+	ButtonStyle, CommandInteraction, CreateActionRow, CreateAttachment, CreateButton,
+	EditInteractionResponse, ReactionType,
+};
 
 use crate::{
+	app::post_cache::{CachedPost, PostCache, dm_button_id},
 	booru::{ImageResult, InlineImageResult},
 	cli,
 	config::BooruConfig,
@@ -135,17 +139,59 @@ pub(crate) async fn edit_interaction(
 	Ok(message)
 }
 
-pub(crate) async fn edit_interaction_with_inline_image(
+pub(crate) async fn edit_interaction_with_dm(
 	http: &serenity::http::Http,
 	pacer: &ApiPacer,
-	booru: &BooruConfig,
+	cache: &PostCache,
 	command: &CommandInteraction,
+	booru: &BooruConfig,
+	image: &ImageResult,
+) -> Result<serenity::model::channel::Message> {
+	pacer.wait().await;
+
+	let cache_id = cache.store(CachedPost {
+		image: image.clone(),
+		booru_name: booru.name.clone(),
+		embed_image: booru.embed_image,
+		inline_data: None,
+		inline_filename: None,
+	});
+
+	let content = format_image_response(booru, image, false);
+	let button = CreateButton::new(dm_button_id(&cache_id))
+		.label("Send to DM")
+		.emoji(ReactionType::Unicode("📬".to_string()))
+		.style(ButtonStyle::Secondary);
+
+	let message = command
+		.edit_response(
+			http,
+			EditInteractionResponse::new()
+				.content(content)
+				.components(vec![CreateActionRow::Buttons(vec![button])]),
+		)
+		.await
+		.map_err(anyhow::Error::from)?;
+	cli::app_output(
+		command.guild_id.map(|g| g.get() as i64),
+		command.channel_id.get() as i64,
+		"sent_message",
+	);
+	Ok(message)
+}
+
+pub(crate) async fn edit_interaction_with_inline_image_dm(
+	http: &serenity::http::Http,
+	pacer: &ApiPacer,
+	cache: &PostCache,
+	command: &CommandInteraction,
+	booru: &BooruConfig,
 	image: &ImageResult,
 	inline_image: InlineImageResult,
 ) -> Result<serenity::model::channel::Message> {
 	let mut builder = EditInteractionResponse::new().new_attachment(CreateAttachment::bytes(
-		inline_image.data,
-		inline_image.filename,
+		inline_image.data.clone(),
+		inline_image.filename.clone(),
 	));
 
 	if let Some(content) = format_inline_image_response(booru, image, inline_image.compressed) {
@@ -153,6 +199,22 @@ pub(crate) async fn edit_interaction_with_inline_image(
 	}
 
 	pacer.wait().await;
+
+	let cache_id = cache.store(CachedPost {
+		image: image.clone(),
+		booru_name: booru.name.clone(),
+		embed_image: true,
+		inline_data: Some(inline_image.data),
+		inline_filename: Some(inline_image.filename),
+	});
+
+	let button = CreateButton::new(dm_button_id(&cache_id))
+		.label("Send to DM")
+		.emoji(ReactionType::Unicode("📬".to_string()))
+		.style(ButtonStyle::Secondary);
+
+	builder = builder.components(vec![CreateActionRow::Buttons(vec![button])]);
+
 	let message = command
 		.edit_response(http, builder)
 		.await
@@ -201,7 +263,7 @@ mod tests {
 			encode_tag_separator: true,
 			tag_spaces_as_plus: false,
 			character_space_replacement: "_".to_string(),
-			count_url: "https://example.test/count".to_string(),
+			count_url: Some("https://example.test/count".to_string()),
 			count_path: vec![],
 			posts_url: "https://example.test/posts".to_string(),
 			posts_path: vec![],

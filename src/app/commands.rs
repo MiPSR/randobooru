@@ -1,19 +1,21 @@
 use std::{
 	collections::HashMap,
 	sync::{
-		atomic::{AtomicBool, AtomicUsize, Ordering},
 		Arc,
+		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
-	time::Duration,
 };
 
 use rand::RngExt;
-use serenity::all::{CommandInteraction, Context, EditInteractionResponse, Interaction};
+use serenity::all::{
+	CommandInteraction, Context, CreateInteractionResponse, CreateInteractionResponseMessage,
+	EditInteractionResponse, Interaction, UserId,
+};
 use tokio::sync::Notify;
 
 use crate::{cli, config::BooruConfig, i18n::I18n};
 
-use super::{command_integer_option, command_string_option, Handler};
+use super::{Handler, command_integer_option, command_string_option};
 
 pub struct JobTracker {
 	active: AtomicUsize,
@@ -78,203 +80,282 @@ impl Drop for JobGuard {
 }
 
 pub(crate) async fn handle_interaction(handler: &Handler, ctx: &Context, interaction: Interaction) {
-	let Interaction::Command(command) = interaction else {
+	let owner = UserId::new(handler.admin_user_id);
+	let result: anyhow::Result<()> = match &interaction {
+		Interaction::Command(command) => handle_command(handler, ctx, command).await,
+		Interaction::Component(component)
+			if (component.data.custom_id.starts_with("ac:")
+				|| component.data.custom_id.starts_with("aa:")
+				|| component.data.custom_id.starts_with("as:")
+				|| component.data.custom_id.starts_with("ay:")
+				|| component.data.custom_id == "an") =>
+		{
+			super::admin_embed::handle_component_interaction(handler, component, ctx).await;
+			Ok(())
+		}
+		Interaction::Component(component) if component.data.custom_id.starts_with("dm:") => {
+			handle_dm_button(handler, component, ctx).await;
+			Ok(())
+		}
+		Interaction::Modal(modal) if modal.data.custom_id.starts_with("am:") => {
+			super::admin_embed::handle_modal_interaction(handler, modal, ctx).await;
+			Ok(())
+		}
+		_ => Ok(()),
+	};
+	if let Err(err) = result {
+		super::report_error(
+			ctx,
+			owner,
+			super::ErrorSeverity::Error,
+			"interaction_create",
+			&err.to_string(),
+			None,
+		)
+		.await;
+	}
+}
+
+async fn handle_dm_button(
+	handler: &Handler,
+	component: &serenity::all::ComponentInteraction,
+	ctx: &Context,
+) {
+	use crate::app::post_cache::{format_dm_content, parse_dm_button_id};
+
+	let custom_id = &component.data.custom_id;
+	let Some(cache_id) = parse_dm_button_id(custom_id) else {
 		return;
 	};
 
+	let user_id = component.user.id;
+
+	let Some(post) = handler.cached_posts.get(cache_id) else {
+		let _ = component
+			.create_response(
+				&ctx.http,
+				CreateInteractionResponse::Message(
+					CreateInteractionResponseMessage::new()
+						.content("This post is no longer available. Please request a new one.")
+						.ephemeral(true),
+				),
+			)
+			.await;
+		return;
+	};
+
+	let mut builder = serenity::all::CreateMessage::new().content(format_dm_content(&post));
+
+	if let (Some(data), Some(filename)) = (&post.inline_data, &post.inline_filename) {
+		builder = builder.add_file(serenity::all::CreateAttachment::bytes(
+			data.clone(),
+			filename.clone(),
+		));
+	}
+
+	let dm_result = user_id.direct_message(&ctx.http, builder).await;
+
+	let response_content = match dm_result {
+		Ok(_) => "Sent to your DMs.",
+		Err(err) => {
+			cli::error(&err.to_string(), "dm_error");
+			"Failed to send DM. Make sure your DMs are open."
+		}
+	};
+
+	let _ = component
+		.create_response(
+			&ctx.http,
+			CreateInteractionResponse::Message(
+				CreateInteractionResponseMessage::new()
+					.content(response_content)
+					.ephemeral(true),
+			),
+		)
+		.await;
+}
+
+async fn handle_command(
+	handler: &Handler,
+	ctx: &Context,
+	command: &serenity::all::CommandInteraction,
+) -> anyhow::Result<()> {
 	let guild_id = command.guild_id.map(|g| g.get() as i64);
 	let channel_id = command.channel_id.get() as i64;
 	let user_id = command.user.id.get() as i64;
 	let command_name = command.data.name.as_str();
 	cli::app_input(guild_id, channel_id, user_id, command_name);
 
-	if let Some(guild_id) = guild_id {
-		let (server_validated, channel_allowed) = {
-			let db = handler.db.lock().expect("db mutex poisoned");
-			let server = db.get_server(guild_id).ok().flatten();
-			let validated = server.map(|s| s.validated).unwrap_or(false);
-			if !validated {
-				(false, false)
-			} else {
-				let has_channels = db.guild_has_channels(guild_id).unwrap_or(false);
-				if has_channels {
-					(true, db.has_channel(guild_id, channel_id).unwrap_or(false))
+	let result: anyhow::Result<()> = async {
+		if let Some(guild_id) = guild_id {
+			let (server_validated, channel_allowed) = {
+				let db = handler.db.lock().expect("db mutex poisoned");
+				let server = db.get_server(guild_id).ok().flatten();
+				let validated = server.map(|s| s.validated).unwrap_or(false);
+				if !validated {
+					(false, false)
 				} else {
-					(true, true)
+					(true, db.has_channel(guild_id, channel_id).unwrap_or(false))
+				}
+			};
+
+			if !server_validated {
+				if command_name == "administrate"
+					&& (user_id == handler.admin_user_id as i64 || {
+						let db = handler.db.lock().expect("db mutex poisoned");
+						db.is_moderator(user_id, Some(guild_id)).unwrap_or(false)
+					}) {
+					super::admin_embed::handle_administrate_embed(
+						handler, command, ctx, user_id,
+					)
+					.await;
+					return Ok(());
+				}
+
+				handler
+					.respond(&ctx.http, command, handler.i18n.server_not_validated())
+					.await;
+				return Ok(());
+			}
+
+			if !channel_allowed {
+				let is_admin = user_id == handler.admin_user_id as i64;
+				let is_mod = {
+					let db = handler.db.lock().expect("db mutex poisoned");
+					db.is_moderator(user_id, Some(guild_id)).unwrap_or(false)
+				};
+				if !is_admin && !is_mod {
+					handler
+						.respond(&ctx.http, command, handler.i18n.channel_not_allowed())
+						.await;
+					return Ok(());
 				}
 			}
+		}
+
+		let i18n = handler.channel_i18n(guild_id, channel_id);
+
+		match command_name {
+			"art-history" => {
+				handle_art_history(handler, ctx, command, &i18n).await;
+				return Ok(());
+			}
+			"administrate" => {
+				super::admin_embed::handle_administrate_embed(handler, command, ctx, user_id)
+					.await;
+				return Ok(());
+			}
+			_ => {}
+		}
+
+		let Some(_job) = handler.jobs.try_start() else {
+			handler
+				.respond(&ctx.http, command, i18n.reload_toml_in_progress())
+				.await;
+			return Ok(());
 		};
 
-		if !server_validated {
-			if command_name == "administrate"
-				&& user_id == handler.admin_user_id as i64
-				&& admin_action_allows_unvalidated(&command)
-			{
-				handle_administrate(handler, ctx, &command, user_id).await;
-				return;
-			}
-
-			handler
-				.respond(&ctx.http, &command, handler.i18n.server_not_validated())
-				.await;
-			return;
+		if command.defer(&ctx.http).await.is_err() {
+			return Ok(());
 		}
 
-		if !channel_allowed {
-			let is_admin = user_id == handler.admin_user_id as i64;
-			let is_mod = {
-				let db = handler.db.lock().expect("db mutex poisoned");
-				db.is_moderator(user_id, Some(guild_id)).unwrap_or(false)
-			};
-			if !is_admin && !is_mod {
-				handler
-					.respond(&ctx.http, &command, handler.i18n.channel_not_allowed())
-					.await;
-				return;
+		if let Some(result) =
+			handle_custom_command(handler, ctx, command, command_name, &i18n).await
+		{
+			match result {
+				Ok(()) => return Ok(()),
+				Err(err) => {
+					handler
+						.edit_deferred(
+							&ctx.http,
+							command,
+							i18n.could_not_find_image(&err.to_string()),
+						)
+						.await;
+					return Ok(());
+				}
 			}
 		}
-	}
 
-	let i18n = handler.channel_i18n(guild_id, channel_id);
+		if let Some(result) = handle_pattern_command(
+			handler,
+			ctx,
+			command,
+			command_name,
+			channel_id,
+			guild_id,
+			&i18n,
+		)
+		.await
+		{
+			match result {
+				Ok(()) => return Ok(()),
+				Err(err) => match err_tag_blocked(&err) {
+					Some(tag) => {
+						handler
+							.edit_deferred(&ctx.http, command, i18n.channel_tag_blocked(&tag))
+							.await;
+						return Ok(());
+					}
+					None => {
+						handler
+							.edit_deferred(
+								&ctx.http,
+								command,
+								i18n.could_not_find_image(&err.to_string()),
+							)
+							.await;
+						return Ok(());
+					}
+				},
+			}
+		}
 
-	match command_name {
-		"reload" => {
-			handle_reload(handler, ctx, &command).await;
-			return;
-		}
-		"art-history" => {
-			handle_art_history(handler, ctx, &command, &i18n).await;
-			return;
-		}
-		"administrate" => {
-			handle_administrate(handler, ctx, &command, user_id).await;
-			return;
-		}
-		_ => {}
-	}
-
-	let Some(_job) = handler.jobs.try_start() else {
 		handler
-			.respond(&ctx.http, &command, i18n.reload_toml_in_progress())
+			.edit_deferred(&ctx.http, command, i18n.command_not_registered())
 			.await;
-		return;
-	};
-
-	if command.defer(&ctx.http).await.is_err() {
-		return;
-	}
-
-	if let Some(result) = handle_custom_command(handler, ctx, &command, command_name, &i18n).await {
-		if let Err(err) = result {
-			handler
-				.edit_deferred(
-					&ctx.http,
-					&command,
-					i18n.could_not_find_image(&err.to_string()),
-				)
-				.await;
-		}
-		return;
-	}
-
-	if let Some(result) = handle_pattern_command(
-		handler,
-		ctx,
-		&command,
-		command_name,
-		channel_id,
-		guild_id,
-		&i18n,
-	)
-	.await
-	{
-		if let Err(err) = result {
-			handler
-				.edit_deferred(
-					&ctx.http,
-					&command,
-					i18n.could_not_find_image(&err.to_string()),
-				)
-				.await;
-		}
-		return;
-	}
-
-	handler
-		.edit_deferred(
-			&ctx.http,
-			&command,
-			format!("unknown command: {}", command_name),
+		super::report_error(
+			ctx,
+			UserId::new(handler.admin_user_id),
+			super::ErrorSeverity::Bug,
+			"command_not_registered",
+			&format!(
+				"unknown slash command `{command_name}` invoked by user {user_id} in guild {guild_id:?} channel {channel_id}"
+			),
+			None,
 		)
 		.await;
+		Ok(())
+	}
+	.await;
+
+	if let Err(err) = &result {
+		super::report_error(
+			ctx,
+			UserId::new(handler.admin_user_id),
+			super::ErrorSeverity::Error,
+			"handle_command",
+			&format!("command={command_name} user={user_id} guild={guild_id:?}"),
+			Some(&err.to_string()),
+		)
+		.await;
+	}
+	result
 }
 
-fn admin_action_allows_unvalidated(command: &CommandInteraction) -> bool {
-	let Some(action) = command_string_option(command, "action") else {
-		return false;
-	};
-
-	let parts: Vec<&str> = action.split_whitespace().take(2).collect();
-	matches!(parts.as_slice(), ["server", "validate"])
+fn err_tag_blocked(err: &anyhow::Error) -> Option<String> {
+	err.downcast_ref::<TagBlockedError>().map(|e| e.tag.clone())
 }
 
-async fn handle_reload(handler: &Handler, ctx: &Context, command: &CommandInteraction) {
-	let user_id = command.user.id.get() as i64;
+#[derive(Debug)]
+struct TagBlockedError {
+	tag: String,
+}
 
-	if user_id != handler.admin_user_id as i64 {
-		let is_mod = {
-			let db = handler.db.lock().expect("db mutex poisoned");
-			let guild_id = command.guild_id.map(|g| g.get() as i64);
-			db.is_moderator(user_id, guild_id).unwrap_or(false)
-		};
-		if !is_mod {
-			handler
-				.respond(&ctx.http, command, handler.i18n.admin_only())
-				.await;
-			return;
-		}
+impl std::fmt::Display for TagBlockedError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "tag `{}` is blocked in this channel", self.tag)
 	}
-
-	if !handler.jobs.begin_reload() {
-		handler
-			.respond(
-				&ctx.http,
-				command,
-				handler.i18n.reload_toml_already_in_progress(),
-			)
-			.await;
-		return;
-	}
-
-	handler
-		.respond(&ctx.http, command, handler.i18n.reload_toml_waiting())
-		.await;
-
-	let active_jobs = handler.jobs.active_count();
-	if active_jobs != 0
-		&& tokio::time::timeout(Duration::from_secs(30), handler.jobs.wait_idle())
-			.await
-			.is_err()
-	{
-		handler
-			.edit_deferred(
-				&ctx.http,
-				command,
-				format!(
-					"{active_jobs} active job(s) did not finish within 30 seconds. Reloading anyway."
-				),
-			)
-			.await;
-	}
-
-	handler.reload_requested.store(true, Ordering::Release);
-
-	handler
-		.edit_deferred(&ctx.http, command, handler.i18n.reload_toml_finished())
-		.await;
-
-	ctx.shard.shutdown_clean();
-	handler.reload_notify.notify_waiters();
 }
 
 async fn handle_art_history(
@@ -410,15 +491,14 @@ async fn handle_custom_command(
 	};
 
 	let mut blacklist = handler.booru_tag_blacklist.to_vec();
-	if let Some(guild_id) = command.guild_id.map(|g| g.get() as i64) {
-		if let Ok(Some(cfg)) = handler
+	if let Some(guild_id) = command.guild_id.map(|g| g.get() as i64)
+		&& let Ok(Some(cfg)) = handler
 			.db
 			.lock()
 			.expect("db mutex poisoned")
 			.get_channel_config(guild_id, command.channel_id.get() as i64)
-		{
-			blacklist.extend(cfg.banned_tags.iter().cloned());
-		}
+	{
+		blacklist.extend(cfg.banned_tags.iter().cloned());
 	}
 	let max_attempts = handler.booru_fetch_retry_limit.saturating_add(1);
 	let candidates = vec![(booru, tags, blacklist)];
@@ -466,22 +546,37 @@ async fn handle_pattern_command(
 	};
 	let pattern_name = pattern_name.as_str();
 
-	let channel_cfg = {
+	let is_admin = command.user.id.get() == handler.admin_user_id;
+	let is_mod = {
 		let db = handler.db.lock().expect("db mutex poisoned");
-		let has_channels = db.guild_has_channels(guild_id).unwrap_or(false);
-		if has_channels {
-			let cfg = db.get_channel_config(guild_id, channel_id).ok().flatten();
-
-			let allowed_patterns = db.get_channel_patterns(guild_id, channel_id).ok()?;
-			if !allowed_patterns.is_empty() && !allowed_patterns.contains(&pattern_name.to_string())
-			{
-				return Some(Err(anyhow::anyhow!(i18n.channel_not_allowed())));
-			}
-			cfg
-		} else {
-			None
-		}
+		db.is_moderator(command.user.id.get() as i64, Some(guild_id))
+			.unwrap_or(false)
 	};
+
+	let (allowed_by_server, channel_cfg, blocked_in_channel) = {
+		let db = handler.db.lock().expect("db mutex poisoned");
+		let allowed = db
+			.get_server_tags(guild_id)
+			.ok()
+			.map(|names| names.iter().any(|n| n == pattern_name))
+			.unwrap_or(false);
+		let cfg = db.get_channel_config(guild_id, channel_id).ok().flatten();
+		let blocked = db
+			.get_channel_patterns(guild_id, channel_id)
+			.ok()
+			.map(|names| names.iter().any(|n| n == pattern_name))
+			.unwrap_or(false);
+		(allowed, cfg, blocked)
+	};
+
+	if !allowed_by_server && !is_admin && !is_mod {
+		return Some(Err(anyhow::anyhow!(i18n.tag_not_registered(pattern_name))));
+	}
+	if blocked_in_channel {
+		return Some(Err(anyhow::anyhow!(TagBlockedError {
+			tag: pattern_name.to_string(),
+		})));
+	}
 	let (enabled_booru_ids, pattern_entries) = {
 		let db = handler.db.lock().expect("db mutex poisoned");
 		let booru_ids = db.get_booru_ids_for_pattern(pattern_name).ok()?;
@@ -493,11 +588,7 @@ async fn handle_pattern_command(
 			.iter()
 			.filter_map(|&id| {
 				let row = db.get_booru_by_id(id).ok()??;
-				if row.enabled {
-					Some(id)
-				} else {
-					None
-				}
+				if row.enabled { Some(id) } else { None }
 			})
 			.collect();
 
@@ -645,24 +736,4 @@ async fn run_with_retry(
 			}
 		}
 	}
-}
-
-async fn handle_administrate(
-	handler: &Handler,
-	ctx: &Context,
-	command: &CommandInteraction,
-	user_id: i64,
-) {
-	if user_id != handler.admin_user_id as i64 {
-		handler
-			.respond(&ctx.http, command, handler.i18n.admin_only())
-			.await;
-		return;
-	}
-
-	let action = command_string_option(command, "action").unwrap_or_default();
-	handler.respond(&ctx.http, command, "processing...").await;
-
-	let response = super::execute_admin_action(handler, &action, command).await;
-	handler.edit_deferred(&ctx.http, command, response).await;
 }

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Row};
+use rusqlite::{Row, params};
 
 use super::Database;
 
@@ -87,18 +87,6 @@ impl Database {
 		Ok(count > 0)
 	}
 
-	pub fn guild_has_channels(&self, guild_id: i64) -> Result<bool> {
-		let count: i64 = self
-			.connection()
-			.query_row(
-				"SELECT COUNT(*) FROM channels WHERE guild_id = ?1",
-				params![guild_id],
-				|row| row.get(0),
-			)
-			.context("failed to check guild channels")?;
-		Ok(count > 0)
-	}
-
 	pub fn add_channel_pattern(
 		&self,
 		guild_id: i64,
@@ -148,6 +136,21 @@ impl Database {
 			names.push(row.context("failed to read pattern name")?);
 		}
 		Ok(names)
+	}
+	pub fn remove_channel(&self, guild_id: i64, channel_id: i64) -> Result<()> {
+		self.connection()
+			.execute(
+				"DELETE FROM channel_patterns WHERE guild_id = ?1 AND channel_id = ?2",
+				params![guild_id, channel_id],
+			)
+			.context("failed to remove channel patterns")?;
+		self.connection()
+			.execute(
+				"DELETE FROM channels WHERE guild_id = ?1 AND channel_id = ?2",
+				params![guild_id, channel_id],
+			)
+			.context("failed to remove channel")?;
+		Ok(())
 	}
 }
 

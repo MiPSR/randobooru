@@ -1,6 +1,11 @@
 use super::Handler;
 
+#[allow(dead_code)]
 pub(crate) async fn run(handler: &Handler, rest: &str) -> String {
+	run_public(handler, rest).await
+}
+
+pub(crate) async fn run_public(handler: &Handler, rest: &str) -> String {
 	let parts: Vec<&str> = rest.splitn(2, ' ').collect();
 	let first = parts[0].trim().to_ascii_lowercase();
 	let (name, args_str) = match first.as_str() {
@@ -30,7 +35,7 @@ async fn add(handler: &Handler, name: Option<&str>, args: &str) -> String {
 		Some(n) => n,
 		None => {
 			return "usage: tags <name> add <booru> <included_comma_sep> [excluded_comma_sep]"
-				.to_string()
+				.to_string();
 		}
 	};
 	let items: Vec<&str> = args.splitn(3, ' ').collect();

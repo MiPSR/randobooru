@@ -1,10 +1,15 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::{config::BooruConfig, db::BooruRow};
 
 use super::Handler;
 
+#[allow(dead_code)]
 pub(crate) async fn run(handler: &Handler, rest: &str) -> String {
+	run_public(handler, rest).await
+}
+
+pub(crate) async fn run_public(handler: &Handler, rest: &str) -> String {
 	let parts: Vec<&str> = rest.splitn(2, ' ').collect();
 	let sub = parts[0].trim().to_ascii_lowercase();
 	let args = parts.get(1).copied().unwrap_or("").trim();
@@ -148,7 +153,7 @@ async fn disable(handler: &Handler, args: &str) -> String {
 
 pub(crate) fn format(booru: &BooruRow) -> String {
 	format!(
-		"name: {}\nenabled: {}\nembed_image: {}\nmax_tags: {}\nsupports_character: {}\npage_size: {}\npage_base: {}\ntag_separator: {}\nencode_tag_separator: {}\ntag_spaces_as_plus: {}\ncharacter_space_replacement: {}\ncount_url: {}\ncount_path: {}\nposts_url: {}\nposts_path: {}\nfile_url_path: {}\nsource_url_path: {}\ndetail_url: {}\ndetail_id_path: {}\ndetail_file_url_path: {}\ndetail_source_url_path: {}\npost_url: {}\nheaders: {}\nenv_params: {}",
+		"name: {}\nenabled: {}\nembed_image: {}\nmax_tags: {}\nsupports_character: {}\npage_size: {}\npage_base: {}\ntag_separator: {}\nencode_tag_separator: {}\ntag_spaces_as_plus: {}\ncharacter_space_replacement: {}\ndescription: {}\ncount_url: {}\ncount_path: {}\nposts_url: {}\nposts_path: {}\nfile_url_path: {}\nsource_url_path: {}\ndetail_url: {}\ndetail_id_path: {}\ndetail_file_url_path: {}\ndetail_source_url_path: {}\npost_url: {}\nheaders: {}\nenv_params: {}",
 		booru.name,
 		booru.enabled,
 		booru.embed_image,
@@ -160,7 +165,12 @@ pub(crate) fn format(booru: &BooruRow) -> String {
 		booru.encode_tag_separator,
 		booru.tag_spaces_as_plus,
 		booru.character_space_replacement,
-		booru.count_url,
+		if booru.description.is_empty() {
+			"null"
+		} else {
+			&booru.description
+		},
+		booru.count_url.as_deref().unwrap_or("null"),
 		booru.count_path_json,
 		booru.posts_url,
 		booru.posts_path_json,
@@ -189,6 +199,10 @@ fn from_json(name: &str, json: &str) -> Result<BooruRow> {
 		.remove("supports_character")
 		.and_then(|value| value.as_bool())
 		.unwrap_or(false);
+	let description = object
+		.remove("description")
+		.and_then(|value| value.as_str().map(String::from))
+		.unwrap_or_default();
 	object.insert(
 		"name".to_string(),
 		serde_json::Value::String(name.to_string()),
@@ -207,6 +221,7 @@ fn from_json(name: &str, json: &str) -> Result<BooruRow> {
 		encode_tag_separator: config.encode_tag_separator,
 		tag_spaces_as_plus: config.tag_spaces_as_plus,
 		character_space_replacement: config.character_space_replacement,
+		description,
 		count_url: config.count_url,
 		count_path_json: serde_json::to_string(&config.count_path)?,
 		posts_url: config.posts_url,
@@ -240,7 +255,8 @@ fn edit_field(booru: &mut BooruRow, field: &str, value: &str) -> Result<()> {
 		"character_space_replacement" => {
 			booru.character_space_replacement = super::non_empty(value, field)?.to_string()
 		}
-		"count_url" => booru.count_url = super::non_empty(value, field)?.to_string(),
+		"description" => booru.description = value.to_string(),
+		"count_url" => booru.count_url = super::optional_string(value),
 		"posts_url" => booru.posts_url = super::non_empty(value, field)?.to_string(),
 		"detail_url" => booru.detail_url = super::optional_string(value),
 		"post_url" => booru.post_url = super::optional_string(value),

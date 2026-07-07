@@ -83,6 +83,18 @@ pub fn init_status(
 	));
 }
 
+pub fn checking_db() {
+	line(format!("{} Checking the DB.", timestamp()));
+}
+
+pub fn db_cleaned(changes: usize) {
+	line(format!(
+		"{} DB cleaned {}.",
+		timestamp(),
+		plural(changes, "row")
+	));
+}
+
 pub fn commands_cleaned() {
 	line(format!("{} Commands cleaned.", timestamp()));
 }
@@ -95,8 +107,24 @@ pub fn server_ready() {
 	line(format!("{} Server ready.", timestamp()));
 }
 
+pub fn bot_loading() {
+	line(format!("{} Bot loading.", timestamp()));
+}
+
+pub fn bot_reloading() {
+	line(format!("{} Bot reloading.", timestamp()));
+}
+
+pub fn bot_loaded() {
+	line(format!("{} Bot loaded.", timestamp()));
+}
+
 pub fn bot_reloaded() {
 	line(format!("{} Bot reloaded.", timestamp()));
+}
+
+pub fn unloaded_everything() {
+	line(format!("{} Unloaded everything.", timestamp()));
 }
 
 pub fn error(error: &str, error_type: &str) {

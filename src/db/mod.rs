@@ -3,11 +3,14 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
+use crate::config::BooruConfig;
+
 mod art_history;
 mod boorus;
 mod channels;
 mod moderators;
 mod patterns;
+mod server_tags;
 mod servers;
 mod settings;
 
@@ -56,6 +59,76 @@ impl Database {
 	pub(crate) fn history_limit(&self) -> usize {
 		self.history_limit
 	}
+
+	pub fn check_and_clean(&self) -> Result<usize> {
+		let mut cleaned = 0usize;
+		let conn = self.connection();
+
+		cleaned += conn
+			.execute(
+				"DELETE FROM tag_pattern_entries
+				 WHERE pattern_id NOT IN (SELECT id FROM tag_patterns)",
+				[],
+			)
+			.context("failed to clean orphan tag pattern entries")?;
+		cleaned += conn
+			.execute(
+				"DELETE FROM tag_patterns
+				 WHERE booru_id NOT IN (SELECT id FROM boorus)",
+				[],
+			)
+			.context("failed to clean orphan tag patterns")?;
+		cleaned += conn
+			.execute(
+				"DELETE FROM booru_custom_parameters
+				 WHERE booru_id NOT IN (SELECT id FROM boorus)",
+				[],
+			)
+			.context("failed to clean orphan booru custom parameters")?;
+		cleaned += conn
+			.execute(
+				"DELETE FROM channel_patterns
+				 WHERE (guild_id, channel_id) NOT IN (SELECT guild_id, channel_id FROM channels)",
+				[],
+			)
+			.context("failed to clean orphan channel patterns")?;
+		cleaned += conn
+			.execute(
+				"DELETE FROM channel_patterns
+				 WHERE (guild_id, pattern_name) NOT IN
+				       (SELECT guild_id, tag_name FROM server_tag_whitelist)",
+				[],
+			)
+			.context("failed to clean channel blacklist names not in server whitelist")?;
+		cleaned += conn
+			.execute(
+				"DELETE FROM server_tag_whitelist
+				 WHERE guild_id NOT IN (SELECT guild_id FROM servers)",
+				[],
+			)
+			.context("failed to clean orphan server tag whitelist entries")?;
+		cleaned += conn
+			.execute(
+				"DELETE FROM channels
+				 WHERE guild_id NOT IN (SELECT guild_id FROM servers)",
+				[],
+			)
+			.context("failed to clean orphan channels")?;
+		cleaned += conn
+			.execute(
+				"UPDATE channels SET banned_tags = '[]'
+				 WHERE json_valid(banned_tags) = 0 OR json_type(banned_tags) != 'array'",
+				[],
+			)
+			.context("failed to clean invalid channel banned_tags")?;
+
+		for booru in self.get_all_boorus()? {
+			BooruConfig::from_row(&booru)
+				.with_context(|| format!("invalid booru config for {}", booru.name))?;
+		}
+
+		Ok(cleaned)
+	}
 }
 
 fn initialize_schema(conn: &Connection) -> Result<()> {
@@ -94,7 +167,8 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
                 encode_tag_separator INTEGER NOT NULL DEFAULT 0,
                 tag_spaces_as_plus INTEGER NOT NULL DEFAULT 0,
                 character_space_replacement TEXT NOT NULL DEFAULT '+',
-                count_url TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                count_url TEXT,
                 count_path_json TEXT NOT NULL DEFAULT '[]',
                 posts_url TEXT NOT NULL,
                 posts_path_json TEXT NOT NULL DEFAULT '[]',
@@ -166,7 +240,19 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
                 pattern_name TEXT NOT NULL,
                 PRIMARY KEY (guild_id, channel_id, pattern_name),
                 FOREIGN KEY (guild_id, channel_id) REFERENCES channels(guild_id, channel_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS server_tag_whitelist (
+                guild_id INTEGER NOT NULL,
+                tag_name TEXT NOT NULL,
+                PRIMARY KEY (guild_id, tag_name),
+                FOREIGN KEY (guild_id) REFERENCES servers(guild_id)
             );",
 	)
-	.context("failed to initialize database schema")
+	.context("failed to initialize database schema")?;
+
+	let _ =
+		conn.execute_batch("ALTER TABLE boorus ADD COLUMN description TEXT NOT NULL DEFAULT '';");
+
+	Ok(())
 }

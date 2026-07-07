@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 include!(concat!(env!("OUT_DIR"), "/i18n_generated.rs"));
 
@@ -72,6 +72,7 @@ impl I18n {
 		self.text("custom_command_no_tags")
 	}
 
+	#[allow(dead_code)]
 	pub fn custom_command_description(&self, booru: &str) -> String {
 		self.render("custom_command_description", &[("booru", booru)])
 	}
@@ -92,16 +93,24 @@ impl I18n {
 		self.text("art_history_option_description")
 	}
 
-	pub fn reload_toml_command_description(&self) -> &'static str {
-		self.text("reload_toml_command_description")
-	}
-
 	pub fn server_not_validated(&self) -> &'static str {
 		self.text("server_not_validated")
 	}
 
 	pub fn channel_not_allowed(&self) -> &'static str {
 		self.text("channel_not_allowed")
+	}
+
+	pub fn channel_tag_blocked(&self, tag: &str) -> String {
+		self.render("channel_tag_blocked", &[("tag", tag)])
+	}
+
+	pub fn command_not_registered(&self) -> &'static str {
+		self.text("command_not_registered")
+	}
+
+	pub fn tag_not_registered(&self, tag: &str) -> String {
+		self.render("tag_not_registered", &[("tag", tag)])
 	}
 
 	pub fn admin_only(&self) -> &'static str {
@@ -116,6 +125,7 @@ impl I18n {
 		self.text("administrate_command_description")
 	}
 
+	#[allow(dead_code)]
 	pub fn administrate_action_description(&self) -> &'static str {
 		self.text("administrate_action_description")
 	}
