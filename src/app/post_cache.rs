@@ -41,7 +41,10 @@ impl PostCache {
 
 	pub fn get(&self, id: &str) -> Option<CachedPost> {
 		let posts = self.posts.lock().expect("post cache mutex poisoned");
-		if let Some((post, _)) = posts.get(id) {
+		if let Some((post, timestamp)) = posts.get(id) {
+			if timestamp.elapsed() >= self.max_age {
+				return None;
+			}
 			return Some(CachedPost {
 				image: ImageResult {
 					image_url: post.image.image_url.clone(),

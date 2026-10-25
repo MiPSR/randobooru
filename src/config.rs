@@ -17,6 +17,8 @@ pub struct BooruConfig {
 	pub encode_tag_separator: bool,
 	pub tag_spaces_as_plus: bool,
 	pub character_space_replacement: String,
+	#[serde(default)]
+	pub pace_ms: u64,
 	pub count_url: Option<String>,
 	pub count_path: Vec<JsonPathSegment>,
 	pub posts_url: String,
@@ -88,6 +90,7 @@ impl BooruConfig {
 			encode_tag_separator: row.encode_tag_separator,
 			tag_spaces_as_plus: row.tag_spaces_as_plus,
 			character_space_replacement: row.character_space_replacement.clone(),
+			pace_ms: row.pace_ms,
 			count_url: row.count_url.clone(),
 			count_path: serde_json::from_str(&row.count_path_json)
 				.context("failed to parse count_path_json")?,
@@ -128,6 +131,7 @@ impl BooruConfig {
 			encode_tag_separator: self.encode_tag_separator,
 			tag_spaces_as_plus: self.tag_spaces_as_plus,
 			character_space_replacement: self.character_space_replacement.clone(),
+			pace_ms: self.pace_ms,
 			description: String::new(),
 			count_url: self.count_url.clone(),
 			count_path_json: serde_json::to_string(&self.count_path)
@@ -170,6 +174,7 @@ mod tests {
 			encode_tag_separator: true,
 			tag_spaces_as_plus: false,
 			character_space_replacement: "_".to_string(),
+			pace_ms: 0,
 			count_url: Some("https://example.test/count?tags={tags}".to_string()),
 			count_path: vec![],
 			posts_url: "https://example.test/posts?tags={tags}&page={page}&limit={limit}"

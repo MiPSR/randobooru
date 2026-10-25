@@ -1233,6 +1233,7 @@ version = "26.1.1-alpha"
 dependencies = [
  "anyhow",
  "chrono",
+ "getrandom 0.4.3",
  "image",
  "rand 0.10.2",
  "reqwest 0.13.4",

@@ -412,6 +412,7 @@ mod tests {
 			encode_tag_separator: true,
 			tag_spaces_as_plus: false,
 			character_space_replacement: "_".to_string(),
+			pace_ms: 0,
 			count_url: Some("https://example.test/count?tags={tags}".to_string()),
 			count_path: vec![JsonPathSegment::Key("count".to_string())],
 			posts_url: "https://example.test/posts?tags={tags}&page={page}&limit={limit}"

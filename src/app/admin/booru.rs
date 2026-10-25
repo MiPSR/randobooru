@@ -153,7 +153,7 @@ async fn disable(handler: &Handler, args: &str) -> String {
 
 pub(crate) fn format(booru: &BooruRow) -> String {
 	format!(
-		"name: {}\nenabled: {}\nembed_image: {}\nmax_tags: {}\nsupports_character: {}\npage_size: {}\npage_base: {}\ntag_separator: {}\nencode_tag_separator: {}\ntag_spaces_as_plus: {}\ncharacter_space_replacement: {}\ndescription: {}\ncount_url: {}\ncount_path: {}\nposts_url: {}\nposts_path: {}\nfile_url_path: {}\nsource_url_path: {}\ndetail_url: {}\ndetail_id_path: {}\ndetail_file_url_path: {}\ndetail_source_url_path: {}\npost_url: {}\nheaders: {}\nenv_params: {}",
+		"name: {}\nenabled: {}\nembed_image: {}\nmax_tags: {}\nsupports_character: {}\npage_size: {}\npage_base: {}\ntag_separator: {}\nencode_tag_separator: {}\ntag_spaces_as_plus: {}\ncharacter_space_replacement: {}\npace_ms: {}\ndescription: {}\ncount_url: {}\ncount_path: {}\nposts_url: {}\nposts_path: {}\nfile_url_path: {}\nsource_url_path: {}\ndetail_url: {}\ndetail_id_path: {}\ndetail_file_url_path: {}\ndetail_source_url_path: {}\npost_url: {}\nheaders: {}\nenv_params: {}",
 		booru.name,
 		booru.enabled,
 		booru.embed_image,
@@ -165,6 +165,7 @@ pub(crate) fn format(booru: &BooruRow) -> String {
 		booru.encode_tag_separator,
 		booru.tag_spaces_as_plus,
 		booru.character_space_replacement,
+		booru.pace_ms,
 		if booru.description.is_empty() {
 			"null"
 		} else {
@@ -221,6 +222,7 @@ fn from_json(name: &str, json: &str) -> Result<BooruRow> {
 		encode_tag_separator: config.encode_tag_separator,
 		tag_spaces_as_plus: config.tag_spaces_as_plus,
 		character_space_replacement: config.character_space_replacement,
+		pace_ms: config.pace_ms,
 		description,
 		count_url: config.count_url,
 		count_path_json: serde_json::to_string(&config.count_path)?,
@@ -255,6 +257,7 @@ fn edit_field(booru: &mut BooruRow, field: &str, value: &str) -> Result<()> {
 		"character_space_replacement" => {
 			booru.character_space_replacement = super::non_empty(value, field)?.to_string()
 		}
+		"pace_ms" => booru.pace_ms = value.parse().context("pace_ms must be a number")?,
 		"description" => booru.description = value.to_string(),
 		"count_url" => booru.count_url = super::optional_string(value),
 		"posts_url" => booru.posts_url = super::non_empty(value, field)?.to_string(),

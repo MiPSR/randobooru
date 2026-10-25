@@ -4,6 +4,7 @@ use rusqlite::{Row, params};
 use super::Database;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ArtHistoryEntry {
 	pub source_link: String,
 	pub channel_id: i64,

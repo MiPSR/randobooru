@@ -6,7 +6,7 @@ use std::{
 	},
 };
 
-use rand::RngExt;
+use getrandom::fill as getrandom_fill;
 use serenity::all::{
 	CommandInteraction, Context, CreateInteractionResponse, CreateInteractionResponseMessage,
 	EditInteractionResponse, Interaction, UserId,
@@ -378,17 +378,7 @@ async fn handle_art_history(
 			.map(|entries| {
 				let links: Vec<String> = entries
 					.iter()
-					.map(|e| {
-						let mut label = format!("[ch:{}]", e.channel_id);
-						if let Some(booru) = e.booru_name.as_deref() {
-							label.push_str(&format!(" [{}]", booru));
-						}
-						if let Some(guild_id) = e.guild_id {
-							label.push_str(&format!(" (guild:{})", guild_id));
-						}
-						label.push_str(&format!(" <{}>", e.source_link));
-						label
-					})
+					.map(|e| e.source_link.clone())
 					.collect();
 				(requested, links)
 			})
@@ -635,7 +625,10 @@ async fn handle_pattern_command(
 			if ids.is_empty() {
 				return None;
 			}
-			let index = rand::rng().random_range(0..ids.len());
+			let mut bytes = [0u8; 8];
+			getrandom_fill(&mut bytes).expect("getrandom failed");
+			let token = u64::from_ne_bytes(bytes);
+			let index = (token as usize) % ids.len();
 			cli::booru_random("booru", index);
 			ids[index]
 		};
@@ -695,7 +688,18 @@ async fn run_with_retry(
 		None => return RetryOutcome::Exhausted(anyhow::anyhow!("no candidates")),
 	};
 
-	match handler.booru.random_image(booru, tags, blacklist).await {
+	let mut bytes = [0u8; 8];
+	getrandom_fill(&mut bytes).expect("getrandom failed");
+	let token = u64::from_ne_bytes(bytes);
+	let history_check = |source_link: &str| {
+		let db = handler.db.lock().expect("db mutex poisoned");
+		db.art_history_exists(source_link, channel_id).unwrap_or(false)
+	};
+	match handler
+		.booru
+		.random_image(booru, tags, blacklist, token, Some(&history_check as &(dyn Fn(&str) -> bool + Send + Sync)))
+		.await
+	{
 		Ok(image) => {
 			if let Some(source_link) = image.post_url.as_deref() {
 				let already_sent = {

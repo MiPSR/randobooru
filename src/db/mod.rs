@@ -253,6 +253,7 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
 
 	let _ =
 		conn.execute_batch("ALTER TABLE boorus ADD COLUMN description TEXT NOT NULL DEFAULT '';");
+	let _ = conn.execute_batch("ALTER TABLE boorus ADD COLUMN pace_ms INTEGER NOT NULL DEFAULT 0;");
 
 	Ok(())
 }

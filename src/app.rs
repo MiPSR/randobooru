@@ -632,6 +632,7 @@ mod tests {
 			encode_tag_separator: true,
 			tag_spaces_as_plus: false,
 			character_space_replacement: "_".to_string(),
+			pace_ms: 0,
 			count_url: Some("https://test/count".to_string()),
 			count_path: vec![],
 			posts_url: "https://test/posts".to_string(),

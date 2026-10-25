@@ -16,6 +16,7 @@ fn test_booru(name: &str) -> BooruRow {
 		encode_tag_separator: true,
 		tag_spaces_as_plus: false,
 		character_space_replacement: "_".to_string(),
+		pace_ms: 0,
 		description: String::new(),
 		count_url: Some("https://test/count?tags={tags}".to_string()),
 		count_path_json: "[]".to_string(),

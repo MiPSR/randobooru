@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Instant};
 
 use anyhow::{Context, Result, bail};
-use rand::RngExt;
+
 use reqwest::{Client, Response, header::HeaderName};
 use serde_json::Value;
 
@@ -30,15 +30,13 @@ pub struct InlineImageResult {
 #[derive(Clone)]
 pub struct BooruClient {
 	http: Client,
-	pacer: ApiPacer,
 	runtime_values: Arc<RuntimeValues>,
 }
 
 impl BooruClient {
-	pub fn new(pacer: ApiPacer, runtime_values: Arc<RuntimeValues>) -> Self {
+	pub fn new(_pacer: ApiPacer, runtime_values: Arc<RuntimeValues>) -> Self {
 		Self {
 			http: Client::new(),
-			pacer,
 			runtime_values,
 		}
 	}
@@ -48,9 +46,25 @@ impl BooruClient {
 		booru: &BooruConfig,
 		tags: &[String],
 		blacklisted_tags: &[String],
+		token: u64,
+		history_check: Option<&(dyn Fn(&str) -> bool + Send + Sync)>,
 	) -> Result<ImageResult> {
 		if tags.is_empty() {
 			bail!("no tags provided for {}", booru.name);
+		}
+
+		for param in &booru.env_params {
+			if matches!(param.source, crate::config::RuntimeValueSource::Custom) {
+				let value = self
+					.runtime_values
+					.get(&booru.name, &param.source, &param.env);
+				if value.map(|v| v.trim().is_empty()).unwrap_or(true) {
+					bail!(
+						"missing custom parameter `{}` for booru `{}`; set it via `booru parameter set {} {} <value>`",
+						param.env, booru.name, booru.name, param.env
+					);
+				}
+			}
 		}
 
 		let encoded_tags = encode_tags(
@@ -60,6 +74,7 @@ impl BooruClient {
 			booru.tag_spaces_as_plus,
 		);
 
+		let pacer = ApiPacer::new(std::time::Duration::from_millis(booru.pace_ms));
 		let count = if let Some(ref count_url) = booru.count_url {
 			let count_url = fill_template(
 				booru,
@@ -69,7 +84,7 @@ impl BooruClient {
 				None,
 				booru.page_size,
 			);
-			self.pacer.wait().await;
+			pacer.wait().await;
 			let count_json = self.request_json(booru, &count_url, "count").await?;
 
 			read_u64_path(&count_json, &booru.count_path)
@@ -85,7 +100,7 @@ impl BooruClient {
 				bail!("{} has no posts for tags: {}", booru.name, tags.join(" "));
 			}
 			let page_count = count.div_ceil(booru.page_size);
-			rand::rng().random_range(0..page_count) + booru.page_base
+			(token as usize % page_count as usize) as u64 + booru.page_base
 		};
 		cli::booru_random("page", random_page);
 		let posts_url = fill_template(
@@ -96,7 +111,7 @@ impl BooruClient {
 			Some(random_page),
 			booru.page_size,
 		);
-		self.pacer.wait().await;
+		pacer.wait().await;
 		let posts_json = self.request_json(booru, &posts_url, "posts").await?;
 
 		let posts = read_array_path(&posts_json, &booru.posts_path)
@@ -104,9 +119,33 @@ impl BooruClient {
 		if posts.is_empty() {
 			bail!("{} returned an empty post page", booru.name);
 		}
-		let post_index = rand::rng().random_range(0..posts.len());
-		cli::booru_random("post", post_index);
-		let post = &posts[post_index];
+		let chosen_index = {
+		let mut idx = (token as usize) % posts.len();
+		if let Some(check) = history_check {
+			let mut attempts = 0usize;
+			while attempts < posts.len() {
+				let post = &posts[idx];
+				if let Some(source_link) = post_url(booru, &self.runtime_values, post)
+					&& check(&source_link)
+				{
+					if attempts + 1 >= posts.len() {
+						break;
+					}
+					if token.is_multiple_of(2) {
+						idx = (idx + 1) % posts.len();
+					} else {
+						idx = (idx + posts.len() - 1) % posts.len();
+					}
+						attempts += 1;
+						continue;
+					}
+				break;
+			}
+		}
+		idx
+	};
+		cli::booru_random("post", chosen_index);
+		let post = &posts[chosen_index];
 		self.image_result(booru, post, blacklisted_tags).await
 	}
 
@@ -115,7 +154,9 @@ impl BooruClient {
 		booru: &BooruConfig,
 		image_url: &str,
 	) -> Result<InlineImageResult> {
-		self.pacer.wait().await;
+		ApiPacer::new(std::time::Duration::from_millis(booru.pace_ms))
+			.wait()
+			.await;
 		let response = self.request_bytes(booru, image_url, "image").await?;
 		let content_type = response_content_type(&response).to_string();
 
@@ -180,7 +221,9 @@ impl BooruClient {
 			.with_context(|| format!("failed to read detail ID for {}", booru.name))?;
 		let detail_url = detail_url_from_id(booru, &self.runtime_values, detail_url, &id);
 
-		self.pacer.wait().await;
+		ApiPacer::new(std::time::Duration::from_millis(booru.pace_ms))
+			.wait()
+			.await;
 		let detail_json = self.request_json(booru, &detail_url, "detail").await?;
 		reject_blacklisted_post(&detail_json, blacklisted_tags)?;
 		let image_url = read_string_path(&detail_json, &booru.detail_file_url_path)

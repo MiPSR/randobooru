@@ -11,6 +11,16 @@ use super::Handler;
 
 const EMBED_COLOR: u32 = 0x5865F2;
 
+// (key, label, description, default)
+const KNOWN_SETTINGS: &[(&str, &str, &str, &str)] = &[
+	("app_lang", "App language", "Default locale for messages (e.g. en, fr).", "en"),
+	("api_rate_pace_ms", "API rate pace (ms)", "Minimum delay between booru API calls.", "0"),
+	("discord_api_pace_ms", "Discord rate pace (ms)", "Minimum delay between Discord API calls.", "0"),
+	("booru_fetch_retry_limit", "Fetch retry limit", "How many times to retry a failed fetch.", "3"),
+	("booru_source_link_history_limit", "Art history limit", "Max stored source links per channel.", "1000"),
+	("booru_tag_blacklist", "Global tag blacklist", "Comma-separated tags blocked everywhere.", ""),
+];
+
 pub(crate) async fn handle_administrate_embed(
 	handler: &Handler,
 	command: &serenity::all::CommandInteraction,
@@ -51,10 +61,14 @@ pub(crate) async fn handle_component_interaction(
 	let user_id = interaction.user.id.get() as i64;
 	let is_admin = user_id == handler.admin_user_id as i64;
 
-	if let Some(category) = custom_id.strip_prefix("ac:") {
+	if let Some(rest) = custom_id.strip_prefix("ac:") {
+		let mut parts = rest.split(':');
+		let category = parts.next().unwrap_or("main");
+		let page = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
 		let (embed, rows) = build_category_page(
 			handler,
 			category,
+			page,
 			is_admin,
 			interaction.guild_id.map(|g| g.get() as i64),
 		);
@@ -130,6 +144,7 @@ pub(crate) async fn handle_modal_interaction(
 		build_category_page(
 			handler,
 			category,
+			0,
 			is_admin,
 			interaction.guild_id.map(|g| g.get() as i64),
 		)
@@ -243,21 +258,22 @@ fn build_main_menu(
 fn build_category_page(
 	handler: &Handler,
 	category: &str,
+	page: usize,
 	is_admin: bool,
 	current_guild: Option<i64>,
 ) -> (CreateEmbed, Vec<CreateActionRow>) {
 	match category {
-		"tags" => build_tags_page(handler, is_admin),
-		"server_tags" => build_server_tags_page(handler, is_admin, current_guild),
-		"boorus" => build_boorus_page(handler, is_admin),
-		"channels" => build_channels_page(handler, is_admin),
-		"validate" => build_validate_page(handler, is_admin),
-		"settings" => build_settings_page(handler, is_admin),
+		"tags" => build_tags_page(handler, page, is_admin),
+		"server_tags" => build_server_tags_page(handler, page, is_admin, current_guild),
+		"boorus" => build_boorus_page(handler, page, is_admin),
+		"channels" => build_channels_page(handler, page, is_admin),
+		"validate" => build_validate_page(handler, page, is_admin),
+		"settings" => build_settings_page(handler, page, is_admin),
 		_ => build_main_menu(handler, is_admin, current_guild),
 	}
 }
 
-fn build_tags_page(handler: &Handler, _is_admin: bool) -> (CreateEmbed, Vec<CreateActionRow>) {
+fn build_tags_page(handler: &Handler, _page: usize, _is_admin: bool) -> (CreateEmbed, Vec<CreateActionRow>) {
 	let db = handler.db.lock().expect("db mutex poisoned");
 	let mut description = String::new();
 
@@ -321,14 +337,14 @@ fn build_tags_page(handler: &Handler, _is_admin: bool) -> (CreateEmbed, Vec<Crea
 	(embed, vec![CreateActionRow::Buttons(buttons)])
 }
 
-fn build_boorus_page(handler: &Handler, _is_admin: bool) -> (CreateEmbed, Vec<CreateActionRow>) {
+fn build_boorus_page(handler: &Handler, page: usize, _is_admin: bool) -> (CreateEmbed, Vec<CreateActionRow>) {
 	let db = handler.db.lock().expect("db mutex poisoned");
-	let mut description = String::new();
+	let mut lines: Vec<String> = Vec::new();
 
 	match db.get_all_boorus() {
 		Ok(boorus) => {
 			if boorus.is_empty() {
-				description.push_str("No boorus configured.");
+				lines.push("No boorus configured.".to_string());
 			} else {
 				for booru in &boorus {
 					let status = if booru.enabled { "🟢" } else { "🔴" };
@@ -337,20 +353,28 @@ fn build_boorus_page(handler: &Handler, _is_admin: bool) -> (CreateEmbed, Vec<Cr
 					} else {
 						format!(" - {}", booru.description)
 					};
-					description.push_str(&format!(
-						"{} **{}**{}  (page_size: {}, max_tags: {})\n",
-						status, booru.name, desc, booru.page_size, booru.max_tags
+					lines.push(format!(
+						"{} **{}**{}  (page_size: {}, max_tags: {}, pace_ms: {})",
+						status, booru.name, desc, booru.page_size, booru.max_tags, booru.pace_ms
 					));
 				}
 			}
 		}
 		Err(err) => {
-			description = format!("Error: {err}");
+			lines.push(format!("Error: {err}"));
 		}
 	}
 
+	let per_page = 8usize;
+	let total = lines.len().div_ceil(per_page).max(1);
+	let page = page.min(total.saturating_sub(1));
+	let start = page * per_page;
+	let end = (start + per_page).min(lines.len());
+	let slice = if lines.is_empty() { &[] as &[String] } else { &lines[start..end] };
+	let description = slice.join("\n");
+
 	let embed = CreateEmbed::new()
-		.title("🖼️ Boorus")
+		.title(format!("🖼️ Boorus  (page {}/{})", page + 1, total))
 		.description(truncate(&description, 3900))
 		.color(EMBED_COLOR);
 
@@ -377,6 +401,21 @@ fn build_boorus_page(handler: &Handler, _is_admin: bool) -> (CreateEmbed, Vec<Cr
 			.emoji(ReactionType::Unicode("⚙️".to_string())),
 	];
 
+	let mut nav_buttons = Vec::new();
+	if page > 0 {
+		nav_buttons.push(
+			CreateButton::new(format!("ac:boorus:{}", page - 1))
+				.label("◀ Prev")
+				.style(ButtonStyle::Secondary),
+		);
+	}
+	if page + 1 < total {
+		nav_buttons.push(
+			CreateButton::new(format!("ac:boorus:{}", page + 1))
+				.label("Next ▶")
+				.style(ButtonStyle::Secondary),
+		);
+	}
 	let back_row = vec![
 		CreateButton::new("ac:main")
 			.label("Back")
@@ -384,16 +423,16 @@ fn build_boorus_page(handler: &Handler, _is_admin: bool) -> (CreateEmbed, Vec<Cr
 			.emoji(ReactionType::Unicode("↩️".to_string())),
 	];
 
-	(
-		embed,
-		vec![
-			CreateActionRow::Buttons(buttons),
-			CreateActionRow::Buttons(back_row),
-		],
-	)
+	let mut rows = vec![CreateActionRow::Buttons(buttons)];
+	if !nav_buttons.is_empty() {
+		rows.push(CreateActionRow::Buttons(nav_buttons));
+	}
+	rows.push(CreateActionRow::Buttons(back_row));
+
+	(embed, rows)
 }
 
-fn build_channels_page(handler: &Handler, _is_admin: bool) -> (CreateEmbed, Vec<CreateActionRow>) {
+fn build_channels_page(handler: &Handler, _page: usize, _is_admin: bool) -> (CreateEmbed, Vec<CreateActionRow>) {
 	let db = handler.db.lock().expect("db mutex poisoned");
 	let mut description = String::new();
 
@@ -474,6 +513,7 @@ fn build_channels_page(handler: &Handler, _is_admin: bool) -> (CreateEmbed, Vec<
 
 fn build_server_tags_page(
 	handler: &Handler,
+	_page: usize,
 	_is_admin: bool,
 	current_guild: Option<i64>,
 ) -> (CreateEmbed, Vec<CreateActionRow>) {
@@ -524,28 +564,43 @@ fn build_server_tags_page(
 	(embed, vec![CreateActionRow::Buttons(buttons)])
 }
 
-fn build_settings_page(handler: &Handler, _is_admin: bool) -> (CreateEmbed, Vec<CreateActionRow>) {
+fn build_settings_page(handler: &Handler, page: usize, _is_admin: bool) -> (CreateEmbed, Vec<CreateActionRow>) {
 	let db = handler.db.lock().expect("db mutex poisoned");
-	let mut description = String::new();
+	let mut lines: Vec<String> = Vec::new();
 
 	match db.get_all_settings() {
 		Ok(settings) => {
 			if settings.is_empty() {
-				description.push_str("No settings configured. Defaults are active.");
+				lines.push("No settings configured. Defaults are active.".to_string());
 			} else {
 				for (key, value) in settings {
-					description.push_str(&format!("**{key}** = `{value}`\n"));
+					let info = KNOWN_SETTINGS.iter().find(|(k, _, _, _)| *k == key);
+					if let Some((_, label, desc, default)) = info {
+						lines.push(format!("**{}** (`{}`) = `{}`", label, key, value));
+						lines.push(format!("  _{}_ (default: `{}`)", desc, default));
+					} else {
+						lines.push(format!("**{key}** (custom) = `{value}`"));
+					}
 				}
 			}
 		}
-		Err(err) => description = format!("Error: {err}"),
+		Err(err) => lines.push(format!("Error: {err}")),
 	}
 
+	let per_page = 10usize;
+	let total = lines.len().div_ceil(per_page).max(1);
+	let page = page.min(total.saturating_sub(1));
+	let start = page * per_page;
+	let end = (start + per_page).min(lines.len());
+	let slice = if lines.is_empty() { &[] as &[String] } else { &lines[start..end] };
+	let description = slice.join("\n");
+
 	let embed = CreateEmbed::new()
-		.title("⚙️ Settings")
+		.title(format!("⚙️ Settings  (page {}/{})", page + 1, total))
 		.description(truncate(&description, 3900))
 		.color(EMBED_COLOR);
-	let buttons = vec![
+
+	let mut buttons = vec![
 		CreateButton::new("aa:settings:add")
 			.label("Add")
 			.style(ButtonStyle::Success)
@@ -558,16 +613,29 @@ fn build_settings_page(handler: &Handler, _is_admin: bool) -> (CreateEmbed, Vec<
 			.label("Delete")
 			.style(ButtonStyle::Danger)
 			.emoji(ReactionType::Unicode("🗑️".to_string())),
-		CreateButton::new("ac:main")
-			.label("Back")
+		CreateButton::new("aa:settings:reset")
+			.label("Reset")
 			.style(ButtonStyle::Secondary)
 			.emoji(ReactionType::Unicode("↩️".to_string())),
 	];
+	let mut nav = Vec::new();
+	if page > 0 {
+		nav.push(CreateButton::new(format!("ac:settings:{}", page - 1)).label("◀ Prev").style(ButtonStyle::Secondary));
+	}
+	if page + 1 < total {
+		nav.push(CreateButton::new(format!("ac:settings:{}", page + 1)).label("Next ▶").style(ButtonStyle::Secondary));
+	}
+	let back = vec![CreateButton::new("ac:main").label("Back").style(ButtonStyle::Secondary).emoji(ReactionType::Unicode("↩️".to_string()))];
 
-	(embed, vec![CreateActionRow::Buttons(buttons)])
+	let mut rows = vec![CreateActionRow::Buttons(buttons)];
+	if !nav.is_empty() {
+		rows.push(CreateActionRow::Buttons(nav));
+	}
+	rows.push(CreateActionRow::Buttons(back));
+	(embed, rows)
 }
 
-fn build_validate_page(handler: &Handler, is_admin: bool) -> (CreateEmbed, Vec<CreateActionRow>) {
+fn build_validate_page(handler: &Handler, _page: usize, is_admin: bool) -> (CreateEmbed, Vec<CreateActionRow>) {
 	let db = handler.db.lock().expect("db mutex poisoned");
 	let mut description = String::new();
 
@@ -637,6 +705,20 @@ async fn handle_action_button(
 	let parts: Vec<&str> = action_str.splitn(2, ':').collect();
 	let category = parts[0];
 	let action = parts.get(1).copied().unwrap_or("");
+
+	if matches!(category, "booru" | "settings" | "val") && !is_admin {
+		let _ = interaction
+			.create_response(
+				&ctx.http,
+				CreateInteractionResponse::Message(
+					CreateInteractionResponseMessage::new()
+						.content(handler.i18n.admin_only())
+						.ephemeral(true),
+				),
+			)
+			.await;
+		return;
+	}
 
 	match (category, action) {
 		("booru", "add") => {
@@ -808,6 +890,12 @@ async fn handle_action_button(
 				"Select Setting to Delete",
 			)
 			.await;
+		}
+		("settings", "reset") => {
+			let modal = setting_modal("am:settings:reset", "Reset Setting to Default", "", "");
+			let _ = interaction
+				.create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
+				.await;
 		}
 		("srvtag", "add") => {
 			let modal = CreateModal::new("am:server_tags:add", "Add Server Tag").components(vec![
@@ -1630,6 +1718,7 @@ async fn respond_after_confirm(
 	let (embed, rows) = build_category_page(
 		handler,
 		category,
+		0,
 		is_admin,
 		interaction.guild_id.map(|g| g.get() as i64),
 	);
@@ -1764,6 +1853,24 @@ async fn process_modal_submission(
 			db.set_setting(&key, &value)
 				.map_err(|err| err.to_string())?;
 			Ok(format!("Setting `{key}` set."))
+		}
+		("settings", "reset") => {
+			let key = get_value("setting_key");
+			if key.trim().is_empty() {
+				return Err("Setting key is required.".to_string());
+			}
+			let default = KNOWN_SETTINGS
+				.iter()
+				.find(|(k, _, _, _)| *k == key)
+				.map(|(_, _, _, d)| *d);
+			match default {
+				Some(def) => {
+					let db = handler.db.lock().expect("db mutex poisoned");
+					db.set_setting(&key, def).map_err(|err| err.to_string())?;
+					Ok(format!("Setting `{key}` reset to default (`{def}`)."))
+				}
+				None => Err(format!("Unknown setting `{key}`; no default.")),
+			}
 		}
 		("tags", "add") => {
 			let pattern_name = get_value("pattern_name");
