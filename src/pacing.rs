@@ -39,4 +39,24 @@ impl ApiPacer {
 			sleep(duration).await;
 		}
 	}
+
+	pub fn with_interval(&self, interval: Duration) -> Self {
+		Self {
+			interval,
+			next_allowed: Arc::clone(&self.next_allowed),
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	#[tokio::test]
+	async fn cloned_pacers_share_the_request_schedule() {
+		let pacer = ApiPacer::new(Duration::from_millis(20));
+		pacer.wait().await;
+		let start = std::time::Instant::now();
+		pacer.clone().wait().await;
+		assert!(start.elapsed() >= Duration::from_millis(15));
+	}
 }

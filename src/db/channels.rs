@@ -15,13 +15,13 @@ impl Database {
 	pub fn set_channel_config(&self, config: &ChannelConfig) -> Result<()> {
 		self.connection()
 			.execute(
-				"INSERT OR REPLACE INTO channels (guild_id, channel_id, nsfw, language, banned_tags)
-                 VALUES (?1, ?2, 0, ?3, ?4)",
+				"INSERT INTO channels (guild_id, channel_id, nsfw, language, banned_tags)
+	                 VALUES (?1, ?2, 0, ?3, ?4) ON CONFLICT(guild_id, channel_id) DO UPDATE SET language=excluded.language, banned_tags=excluded.banned_tags",
 				params![
 					config.guild_id,
 					config.channel_id,
 					config.language,
-					serde_json::to_string(&config.banned_tags).unwrap_or_default(),
+					serde_json::to_string(&config.banned_tags.iter().map(|t| t.trim().to_ascii_lowercase()).filter(|t| !t.is_empty()).collect::<Vec<_>>())?,
 				],
 			)
 			.context("failed to set channel config")?;
@@ -93,6 +93,12 @@ impl Database {
 		channel_id: i64,
 		pattern_name: &str,
 	) -> Result<()> {
+		anyhow::ensure!(
+			self.get_server_tags(guild_id)?
+				.iter()
+				.any(|tag| tag == pattern_name),
+			"channel blacklist entries must be enabled server tags"
+		);
 		self.connection()
 			.execute(
 				"INSERT OR IGNORE INTO channel_patterns (guild_id, channel_id, pattern_name)
@@ -159,6 +165,8 @@ fn read_channel_row(row: &Row<'_>) -> rusqlite::Result<ChannelConfig> {
 		guild_id: row.get(0)?,
 		channel_id: row.get(1)?,
 		language: row.get(2)?,
-		banned_tags: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
+		banned_tags: serde_json::from_str(&row.get::<_, String>(3)?).map_err(|e| {
+			rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
+		})?,
 	})
 }

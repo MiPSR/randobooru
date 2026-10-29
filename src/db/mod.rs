@@ -57,12 +57,17 @@ impl Database {
 	}
 
 	pub(crate) fn history_limit(&self) -> usize {
-		self.history_limit
+		self.get_setting("booru_source_link_history_limit")
+			.ok()
+			.flatten()
+			.and_then(|v| v.parse().ok())
+			.unwrap_or(self.history_limit)
 	}
 
 	pub fn check_and_clean(&self) -> Result<usize> {
 		let mut cleaned = 0usize;
-		let conn = self.connection();
+		let tx = self.connection().unchecked_transaction()?;
+		let conn = &tx;
 
 		cleaned += conn
 			.execute(
@@ -88,7 +93,8 @@ impl Database {
 		cleaned += conn
 			.execute(
 				"DELETE FROM channel_patterns
-				 WHERE (guild_id, channel_id) NOT IN (SELECT guild_id, channel_id FROM channels)",
+				 WHERE guild_id NOT IN (SELECT guild_id FROM servers)
+				 OR (guild_id, channel_id) NOT IN (SELECT guild_id, channel_id FROM channels)",
 				[],
 			)
 			.context("failed to clean orphan channel patterns")?;
@@ -114,24 +120,50 @@ impl Database {
 				[],
 			)
 			.context("failed to clean orphan channels")?;
-		cleaned += conn
-			.execute(
-				"UPDATE channels SET banned_tags = '[]'
-				 WHERE json_valid(banned_tags) = 0 OR json_type(banned_tags) != 'array'",
-				[],
-			)
-			.context("failed to clean invalid channel banned_tags")?;
+		let mut stmt = conn.prepare("SELECT guild_id, channel_id, banned_tags FROM channels")?;
+		let rows = stmt.query_map([], |r| {
+			Ok((
+				r.get::<_, i64>(0)?,
+				r.get::<_, i64>(1)?,
+				r.get::<_, String>(2)?,
+			))
+		})?;
+		for row in rows {
+			let (guild, channel, tags) = row?;
+			serde_json::from_str::<Vec<String>>(&tags).with_context(|| {
+				format!(
+					"invalid banned_tags in guild {guild} channel {channel}; refusing to silently remove filtering"
+				)
+			})?;
+		}
+		drop(stmt);
 
 		for booru in self.get_all_boorus()? {
 			BooruConfig::from_row(&booru)
 				.with_context(|| format!("invalid booru config for {}", booru.name))?;
 		}
-
+		let violations: i64 =
+			conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+				r.get(0)
+			})?;
+		anyhow::ensure!(
+			violations == 0,
+			"database has unresolved foreign-key violations"
+		);
+		tx.commit()?;
 		Ok(cleaned)
 	}
 }
 
 fn initialize_schema(conn: &Connection) -> Result<()> {
+	let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+	anyhow::ensure!(
+		version <= 1,
+		"database was created by a newer randobooru version"
+	);
+	let old_patterns: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='boorus') AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='server_tag_whitelist')", [], |r| r.get(0))?;
+	let tx = conn.unchecked_transaction()?;
+	let conn = &tx;
 	conn.execute_batch(
 		"CREATE TABLE IF NOT EXISTS servers (
                 guild_id INTEGER PRIMARY KEY,
@@ -251,9 +283,50 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
 	)
 	.context("failed to initialize database schema")?;
 
-	let _ =
-		conn.execute_batch("ALTER TABLE boorus ADD COLUMN description TEXT NOT NULL DEFAULT '';");
-	let _ = conn.execute_batch("ALTER TABLE boorus ADD COLUMN pace_ms INTEGER NOT NULL DEFAULT 0;");
-
+	for (column, definition) in [
+		("description", "TEXT NOT NULL DEFAULT ''"),
+		("pace_ms", "INTEGER NOT NULL DEFAULT 0"),
+		("fetch_options_json", "TEXT NOT NULL DEFAULT '{}'"),
+	] {
+		let exists: bool = conn.query_row(
+			"SELECT EXISTS(SELECT 1 FROM pragma_table_info('boorus') WHERE name=?1)",
+			[column],
+			|r| r.get(0),
+		)?;
+		if !exists {
+			conn.execute_batch(&format!(
+				"ALTER TABLE boorus ADD COLUMN {column} {definition}"
+			))?;
+		}
+	}
+	let required: bool = conn.query_row(
+		"SELECT \"notnull\" FROM pragma_table_info('boorus') WHERE name='count_url'",
+		[],
+		|r| r.get(0),
+	)?;
+	if required {
+		conn.execute_batch(
+			"ALTER TABLE boorus RENAME COLUMN count_url TO legacy_count_url;
+		ALTER TABLE boorus ADD COLUMN count_url TEXT;
+		UPDATE boorus SET count_url=legacy_count_url;
+		ALTER TABLE boorus DROP COLUMN legacy_count_url;",
+		)?;
+	}
+	if old_patterns {
+		conn.execute("DELETE FROM channel_patterns", [])?;
+		crate::cli::error(
+			"Legacy channel allowlists require reconfiguration as server whitelists and channel blacklists.",
+			"MIGRATION",
+		);
+	}
+	conn.execute_batch("DELETE FROM moderators WHERE rowid NOT IN (SELECT MIN(rowid) FROM moderators GROUP BY user_id, guild_id);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_global_moderator ON moderators(user_id) WHERE guild_id IS NULL;
+	CREATE TABLE IF NOT EXISTS delivered_posts (
+	 id TEXT PRIMARY KEY, channel_id INTEGER NOT NULL, art_id INTEGER REFERENCES art_history(id) ON DELETE CASCADE,
+	 payload TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch())
+	);
+	CREATE INDEX IF NOT EXISTS idx_delivered_posts_channel ON delivered_posts(channel_id, created_at);
+	PRAGMA user_version=1;")?;
+	tx.commit()?;
 	Ok(())
 }

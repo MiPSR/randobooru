@@ -128,7 +128,12 @@ pub(crate) async fn edit_interaction(
 ) -> Result<serenity::model::channel::Message> {
 	pacer.wait().await;
 	let message = command
-		.edit_response(http, EditInteractionResponse::new().content(content))
+		.edit_response(
+			http,
+			EditInteractionResponse::new()
+				.content(content)
+				.allowed_mentions(serenity::all::CreateAllowedMentions::new()),
+		)
 		.await
 		.map_err(anyhow::Error::from)?;
 	cli::app_output(
@@ -146,16 +151,17 @@ pub(crate) async fn edit_interaction_with_dm(
 	command: &CommandInteraction,
 	booru: &BooruConfig,
 	image: &ImageResult,
-) -> Result<serenity::model::channel::Message> {
+) -> Result<String> {
 	pacer.wait().await;
 
-	let cache_id = cache.store(CachedPost {
-		image: image.clone(),
-		booru_name: booru.name.clone(),
-		embed_image: booru.embed_image,
-		inline_data: None,
-		inline_filename: None,
-	});
+	let cache_id = cache.store(
+		CachedPost {
+			image: image.clone(),
+			booru_name: booru.name.clone(),
+			embed_image: booru.embed_image,
+		},
+		command.channel_id.get() as i64,
+	)?;
 
 	let content = format_image_response(booru, image, false);
 	let button = CreateButton::new(dm_button_id(&cache_id))
@@ -163,21 +169,25 @@ pub(crate) async fn edit_interaction_with_dm(
 		.emoji(ReactionType::Unicode("📬".to_string()))
 		.style(ButtonStyle::Secondary);
 
-	let message = command
+	let result = command
 		.edit_response(
 			http,
 			EditInteractionResponse::new()
+				.allowed_mentions(serenity::all::CreateAllowedMentions::new())
 				.content(content)
 				.components(vec![CreateActionRow::Buttons(vec![button])]),
 		)
-		.await
-		.map_err(anyhow::Error::from)?;
+		.await;
+	if let Err(err) = result {
+		cache.remove(&cache_id)?;
+		return Err(err.into());
+	}
 	cli::app_output(
 		command.guild_id.map(|g| g.get() as i64),
 		command.channel_id.get() as i64,
 		"sent_message",
 	);
-	Ok(message)
+	Ok(cache_id)
 }
 
 pub(crate) async fn edit_interaction_with_inline_image_dm(
@@ -188,10 +198,10 @@ pub(crate) async fn edit_interaction_with_inline_image_dm(
 	booru: &BooruConfig,
 	image: &ImageResult,
 	inline_image: InlineImageResult,
-) -> Result<serenity::model::channel::Message> {
+) -> Result<String> {
 	let mut builder = EditInteractionResponse::new().new_attachment(CreateAttachment::bytes(
-		inline_image.data.clone(),
-		inline_image.filename.clone(),
+		inline_image.data,
+		inline_image.filename,
 	));
 
 	if let Some(content) = format_inline_image_response(booru, image, inline_image.compressed) {
@@ -200,31 +210,35 @@ pub(crate) async fn edit_interaction_with_inline_image_dm(
 
 	pacer.wait().await;
 
-	let cache_id = cache.store(CachedPost {
-		image: image.clone(),
-		booru_name: booru.name.clone(),
-		embed_image: true,
-		inline_data: Some(inline_image.data),
-		inline_filename: Some(inline_image.filename),
-	});
+	let cache_id = cache.store(
+		CachedPost {
+			image: image.clone(),
+			booru_name: booru.name.clone(),
+			embed_image: true,
+		},
+		command.channel_id.get() as i64,
+	)?;
 
 	let button = CreateButton::new(dm_button_id(&cache_id))
 		.label("Send to DM")
 		.emoji(ReactionType::Unicode("📬".to_string()))
 		.style(ButtonStyle::Secondary);
 
-	builder = builder.components(vec![CreateActionRow::Buttons(vec![button])]);
+	builder = builder
+		.allowed_mentions(serenity::all::CreateAllowedMentions::new())
+		.components(vec![CreateActionRow::Buttons(vec![button])]);
 
-	let message = command
-		.edit_response(http, builder)
-		.await
-		.map_err(anyhow::Error::from)?;
+	let result = command.edit_response(http, builder).await;
+	if let Err(err) = result {
+		cache.remove(&cache_id)?;
+		return Err(err.into());
+	}
 	cli::app_output(
 		command.guild_id.map(|g| g.get() as i64),
 		command.channel_id.get() as i64,
 		"sent_attachment",
 	);
-	Ok(message)
+	Ok(cache_id)
 }
 
 pub(crate) fn log_final_selection(image: &ImageResult, inline_image: &InlineImageResult) {
@@ -277,6 +291,7 @@ mod tests {
 			detail_source_url_path: vec![],
 			headers: HashMap::new(),
 			env_params: vec![],
+			fetch_options: crate::config::FetchOptions::default(),
 		}
 	}
 

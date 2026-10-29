@@ -12,6 +12,10 @@ pub struct BooruCustomParameter {
 
 impl Database {
 	pub fn add_moderator(&self, user_id: i64, guild_id: Option<i64>, added_by: i64) -> Result<()> {
+		anyhow::ensure!(
+			guild_id.is_some_and(|g| g > 0) && user_id > 0,
+			"moderators must belong to a guild"
+		);
 		self.connection()
 			.execute(
 				"INSERT OR IGNORE INTO moderators (user_id, guild_id, added_by) VALUES (?1, ?2, ?3)",
@@ -56,9 +60,7 @@ impl Database {
 	pub fn is_moderator(&self, user_id: i64, guild_id: Option<i64>) -> Result<bool> {
 		let conn = self.connection();
 		let mut stmt = conn
-			.prepare(
-				"SELECT COUNT(*) FROM moderators WHERE user_id = ?1 AND (guild_id IS NULL OR guild_id IS ?2)",
-			)
+			.prepare("SELECT COUNT(*) FROM moderators WHERE user_id = ?1 AND guild_id = ?2")
 			.context("failed to prepare is_moderator query")?;
 		let count: i64 = stmt
 			.query_row(params![user_id, guild_id], |row| row.get(0))

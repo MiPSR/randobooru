@@ -32,6 +32,7 @@ pub struct BooruRow {
 	pub post_url: Option<String>,
 	pub headers_json: String,
 	pub env_params_json: String,
+	pub fetch_options_json: String,
 }
 
 const COLUMNS: &str = "id, name, enabled, embed_image, max_tags, supports_character,
@@ -41,10 +42,11 @@ const COLUMNS: &str = "id, name, enabled, embed_image, max_tags, supports_charac
 	file_url_path_json, source_url_path_json, detail_url,
 	detail_id_path_json, detail_file_url_path_json,
 	detail_source_url_path_json, post_url, headers_json,
-	env_params_json";
+	env_params_json, fetch_options_json";
 
 impl Database {
 	pub fn add_booru(&self, booru: &BooruRow) -> Result<i64> {
+		self.validate_booru_row(booru)?;
 		self.connection()
 			.execute(
 				"INSERT INTO boorus (name, enabled, embed_image, max_tags, supports_character,
@@ -54,9 +56,9 @@ impl Database {
 	posts_url, posts_path_json, file_url_path_json,
 	source_url_path_json, detail_url, detail_id_path_json,
 	detail_file_url_path_json, detail_source_url_path_json,
-	post_url, headers_json, env_params_json)
+	post_url, headers_json, env_params_json, fetch_options_json)
 	VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-	?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+	?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
 				params![
 					booru.name,
 					booru.enabled as i64,
@@ -84,6 +86,7 @@ impl Database {
 					booru.post_url,
 					booru.headers_json,
 					booru.env_params_json,
+					booru.fetch_options_json,
 				],
 			)
 			.context("failed to add booru")?;
@@ -91,6 +94,7 @@ impl Database {
 	}
 
 	pub fn update_booru(&self, booru: &BooruRow) -> Result<()> {
+		self.validate_booru_row(booru)?;
 		let changed = self
 			.connection()
 			.execute(
@@ -120,8 +124,9 @@ impl Database {
 	post_url = ?23,
 	headers_json = ?24,
 	env_params_json = ?25,
-	pace_ms = ?26
-	WHERE id = ?27",
+	pace_ms = ?26,
+	fetch_options_json = ?27
+	WHERE id = ?28",
 				params![
 					booru.name,
 					booru.enabled as i64,
@@ -149,6 +154,7 @@ impl Database {
 					booru.headers_json,
 					booru.env_params_json,
 					booru.pace_ms as i64,
+					booru.fetch_options_json,
 					booru.id,
 				],
 			)
@@ -172,19 +178,68 @@ impl Database {
 		Ok(())
 	}
 
-	pub fn set_booru_enabled(&self, name: &str, enabled: bool) -> Result<()> {
-		let changed = self
-			.connection()
-			.execute(
-				"UPDATE boorus SET enabled = ?1 WHERE name = ?2",
-				params![enabled as i64, name],
-			)
-			.context("failed to set booru enabled")?;
-
-		if changed == 0 {
-			bail!("booru {name} not found");
+	fn validate_booru_row(&self, row: &BooruRow) -> Result<()> {
+		crate::config::BooruConfig::from_row(row)?;
+		anyhow::ensure!(
+			row.description.chars().count() <= 100,
+			"description must be at most 100 characters"
+		);
+		let name = crate::app::custom_command_name(&row.name);
+		let description = if row.description.is_empty() {
+			&row.name
+		} else {
+			&row.description
+		};
+		anyhow::ensure!(
+			(1..=100).contains(&description.chars().count()),
+			"effective command description must be 1..100 characters"
+		);
+		for other in self.get_all_boorus()? {
+			anyhow::ensure!(
+				other.id == row.id || crate::app::custom_command_name(&other.name) != name,
+				"provider command name collision"
+			);
+		}
+		for pattern in self.get_unique_pattern_names()? {
+			anyhow::ensure!(
+				crate::app::discord_name_component(&pattern) != name,
+				"provider command collides with a tag command"
+			);
+		}
+		let mut boorus = self.get_all_boorus()?;
+		boorus.retain(|b| b.id != row.id);
+		boorus.push(row.clone());
+		for guild in self.get_validated_servers()? {
+			self.validate_guild_capacity(&boorus, &self.get_server_tags(guild.guild_id)?)?;
 		}
 		Ok(())
+	}
+
+	pub(super) fn validate_guild_capacity(
+		&self,
+		boorus: &[BooruRow],
+		tags: &[String],
+	) -> Result<()> {
+		let mut commands = boorus.iter().filter(|b| b.enabled).count() + 5;
+		for tag in tags {
+			let ids = self.get_booru_ids_for_pattern(tag)?;
+			if boorus.iter().any(|b| b.enabled && ids.contains(&b.id)) {
+				commands += 1;
+			}
+		}
+		anyhow::ensure!(
+			commands <= 100,
+			"configuration would exceed Discord's 100 commands per guild"
+		);
+		Ok(())
+	}
+
+	pub fn set_booru_enabled(&self, name: &str, enabled: bool) -> Result<()> {
+		let mut row = self
+			.get_booru_by_name(name)?
+			.ok_or_else(|| anyhow::anyhow!("provider {name} not found"))?;
+		row.enabled = enabled;
+		self.update_booru(&row)
 	}
 
 	pub fn get_booru_by_name(&self, name: &str) -> Result<Option<BooruRow>> {
@@ -340,6 +395,7 @@ fn read_booru_row(row: &Row<'_>) -> rusqlite::Result<BooruRow> {
 		post_url: row.get(24)?,
 		headers_json: row.get(25)?,
 		env_params_json: row.get(26)?,
+		fetch_options_json: row.get(27)?,
 	})
 }
 

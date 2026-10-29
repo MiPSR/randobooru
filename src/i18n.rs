@@ -26,26 +26,6 @@ impl I18n {
 		self.render("could_not_find_image", &[("error", error)])
 	}
 
-	pub fn reload_toml_already_in_progress(&self) -> &'static str {
-		self.text("reload_toml_already_in_progress")
-	}
-
-	pub fn reload_toml_waiting(&self) -> &'static str {
-		self.text("reload_toml_waiting")
-	}
-
-	pub fn reload_toml_finished(&self) -> &'static str {
-		self.text("reload_toml_finished")
-	}
-
-	pub fn reload_toml_in_progress(&self) -> &'static str {
-		self.text("reload_toml_in_progress")
-	}
-
-	pub fn art_history_error(&self, error: &str) -> String {
-		self.render("art_history_error", &[("error", error)])
-	}
-
 	pub fn art_history_no_links(&self) -> &'static str {
 		self.text("art_history_no_links")
 	}
@@ -115,10 +95,6 @@ impl I18n {
 
 	pub fn admin_only(&self) -> &'static str {
 		self.text("admin_only")
-	}
-
-	pub fn administrate_help(&self) -> &'static str {
-		self.text("administrate_help")
 	}
 
 	pub fn administrate_command_description(&self) -> &'static str {

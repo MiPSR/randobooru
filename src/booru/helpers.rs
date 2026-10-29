@@ -10,10 +10,21 @@ use crate::config::{BooruConfig, JsonPathSegment, RuntimeValueSource, RuntimeVal
 pub(super) const INLINE_IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
 
 pub(super) fn compress_to_jpeg(bytes: &[u8]) -> Result<Vec<u8>> {
-	let image = image::load_from_memory(bytes)
+	let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
+	let mut limits = image::Limits::default();
+	limits.max_image_width = Some(8192);
+	limits.max_image_height = Some(8192);
+	limits.max_alloc = Some(256 * 1024 * 1024);
+	reader.limits(limits);
+	let image = reader
+		.decode()
 		.context("failed to decode oversized image for JPEG compression")?;
+	let image = if image.width() > 4096 || image.height() > 4096 {
+		image.thumbnail(4096, 4096)
+	} else {
+		image
+	};
 	let image = flatten_for_jpeg(image);
-	let mut last = Vec::new();
 
 	for quality in [90, 80, 70, 60, 50, 40, 30, 20] {
 		let mut encoded = Vec::new();
@@ -24,11 +35,8 @@ pub(super) fn compress_to_jpeg(bytes: &[u8]) -> Result<Vec<u8>> {
 		if encoded.len() <= INLINE_IMAGE_MAX_BYTES {
 			return Ok(encoded);
 		}
-
-		last = encoded;
 	}
-
-	Ok(last)
+	bail!("compressed image still exceeds Discord's upload limit")
 }
 
 pub(super) async fn ensure_success(
@@ -42,10 +50,8 @@ pub(super) async fn ensure_success(
 	}
 
 	let content_type = response_content_type(&response);
-	let body = response.text().await.unwrap_or_default();
-	let body = body.chars().take(500).collect::<String>();
 	bail!(
-		"{kind} request failed for {} with HTTP {status} content-type={content_type}: {body}",
+		"{kind} request failed for {} with HTTP {status} content-type={content_type}",
 		booru.name,
 	);
 }
@@ -237,10 +243,6 @@ pub(super) fn value_to_template_string(value: &Value) -> Option<String> {
 }
 
 pub(super) fn read_u64_path(value: &Value, path: &[JsonPathSegment]) -> Option<u64> {
-	if path.is_empty() {
-		return value.as_array().map(|array| array.len() as u64);
-	}
-
 	match read_path(value, path)? {
 		Value::Number(number) => number.as_u64(),
 		Value::String(string) => string.parse().ok(),
@@ -306,22 +308,25 @@ pub(super) fn detail_url_from_id(
 		.replace("{id}", &urlencoding::encode(id))
 }
 
+#[cfg(test)]
 pub(super) fn reject_blacklisted_post(post: &Value, blacklisted_tags: &[String]) -> Result<()> {
 	if blacklisted_tags.is_empty() {
 		return Ok(());
 	}
 
 	let post_tags = extract_post_tags(post);
-	if let Some(tag) = blacklisted_tags
-		.iter()
-		.find(|tag| post_tags.iter().any(|post_tag| post_tag == *tag))
-	{
+	if let Some(tag) = blacklisted_tags.iter().find(|tag| {
+		post_tags
+			.iter()
+			.any(|post_tag| post_tag == &tag.trim().to_ascii_lowercase())
+	}) {
 		bail!("post matched blacklisted tag: {tag}");
 	}
 
 	Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn extract_post_tags(post: &Value) -> Vec<String> {
 	let mut tags = Vec::new();
 
@@ -357,12 +362,45 @@ pub(super) fn collect_tags_from_value(value: Option<&Value>, tags: &mut Vec<Stri
 			}
 		}
 		Value::Object(map) => {
-			for key in ["name", "tag", "value"] {
-				collect_tags_from_value(map.get(key), tags);
+			for value in map.values() {
+				collect_tags_from_value(Some(value), tags);
 			}
 		}
 		_ => {}
 	}
+}
+
+pub(super) fn reject_configured_blacklist(
+	post: &Value,
+	booru: &BooruConfig,
+	blacklist: &[String],
+) -> Result<()> {
+	if blacklist.is_empty() {
+		return Ok(());
+	}
+	let mut tags = Vec::new();
+	let mut found = false;
+	for path in &booru.fetch_options.tag_paths {
+		if let Some(value) = read_path(post, path) {
+			if value.is_string() || value.is_array() || value.is_object() {
+				found = true;
+			}
+			collect_tags_from_value(Some(value), &mut tags);
+		}
+	}
+	anyhow::ensure!(
+		found,
+		"cannot inspect post tags; configure fetch_options.tag_paths before using blacklists"
+	);
+	for blocked in blacklist {
+		anyhow::ensure!(
+			!tags
+				.iter()
+				.any(|tag| tag == &blocked.trim().to_ascii_lowercase()),
+			"post matched a blacklisted tag"
+		);
+	}
+	Ok(())
 }
 
 pub(super) fn split_tag_string(value: &str) -> impl Iterator<Item = String> + '_ {
@@ -427,6 +465,7 @@ mod tests {
 			detail_source_url_path: vec![],
 			headers: std::collections::HashMap::new(),
 			env_params: vec![],
+			fetch_options: crate::config::FetchOptions::default(),
 		}
 	}
 
@@ -510,6 +549,26 @@ mod tests {
 		let err = reject_blacklisted_post(&post, &["banned_tag".to_string()]).unwrap_err();
 
 		assert!(err.to_string().contains("blacklisted tag: banned_tag"));
+	}
+
+	#[test]
+	fn configured_nested_tags_and_case_normalization() {
+		let mut booru = test_booru();
+		booru.fetch_options.tag_paths = vec![vec![
+			JsonPathSegment::Key("metadata".into()),
+			JsonPathSegment::Key("tags".into()),
+		]];
+		let post = serde_json::json!({"metadata":{"tags":{"general":["blocked"]}}});
+		assert!(reject_configured_blacklist(&post, &booru, &[" Blocked ".into()]).is_err());
+		assert!(reject_configured_blacklist(&post, &booru, &["different".into()]).is_ok());
+		assert!(
+			reject_configured_blacklist(&serde_json::json!({}), &booru, &["blocked".into()])
+				.is_err()
+		);
+	}
+	#[test]
+	fn root_numeric_count_is_supported() {
+		assert_eq!(read_u64_path(&serde_json::json!(42), &[]), Some(42));
 	}
 
 	#[test]

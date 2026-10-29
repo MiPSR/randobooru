@@ -8,14 +8,13 @@ pub struct Server {
 	pub guild_id: i64,
 	pub name: String,
 	pub validated: bool,
-	pub interaction_channels: Vec<i64>,
 }
 
 impl Database {
 	pub fn add_server(&self, guild_id: i64, name: &str) -> Result<()> {
 		self.connection()
 			.execute(
-				"INSERT OR IGNORE INTO servers (guild_id, name) VALUES (?1, ?2)",
+				"INSERT INTO servers (guild_id, name) VALUES (?1, ?2) ON CONFLICT(guild_id) DO UPDATE SET name=excluded.name",
 				params![guild_id, name],
 			)
 			.context("failed to add server")?;
@@ -34,6 +33,12 @@ impl Database {
 	}
 
 	pub fn set_validated(&self, guild_id: i64, validated: bool) -> Result<()> {
+		if validated {
+			self.validate_guild_capacity(
+				&self.get_all_boorus()?,
+				&self.get_server_tags(guild_id)?,
+			)?;
+		}
 		let changed = self
 			.connection()
 			.execute(
@@ -54,22 +59,6 @@ impl Database {
 
 	pub fn get_all_servers(&self) -> Result<Vec<Server>> {
 		self.query_servers("ORDER BY guild_id", [])
-	}
-
-	pub fn set_interaction_channels(&self, guild_id: i64, channels: &[i64]) -> Result<()> {
-		let json = serde_json::to_string(channels).context("failed to serialize channels")?;
-		let changed = self
-			.connection()
-			.execute(
-				"UPDATE servers SET interaction_channels = ?1 WHERE guild_id = ?2",
-				params![json, guild_id],
-			)
-			.context("failed to set interaction channels")?;
-
-		if changed == 0 {
-			bail!("server {guild_id} not found");
-		}
-		Ok(())
 	}
 
 	fn query_servers(&self, suffix: &str, params: impl rusqlite::Params) -> Result<Vec<Server>> {
@@ -95,7 +84,6 @@ fn read_server_row(row: &Row<'_>) -> rusqlite::Result<Server> {
 		guild_id: row.get(0)?,
 		name: row.get(1)?,
 		validated: row.get::<_, i64>(2)? != 0,
-		interaction_channels: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
 	})
 }
 
@@ -106,6 +94,8 @@ pub(super) fn open_test_db() -> Database {
 	use super::initialize_schema;
 
 	let conn = Connection::open_in_memory().expect("in-memory db");
+	conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")
+		.unwrap();
 	initialize_schema(&conn).expect("schema");
 	Database {
 		conn,

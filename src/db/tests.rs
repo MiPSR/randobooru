@@ -31,6 +31,7 @@ fn test_booru(name: &str) -> BooruRow {
 		post_url: None,
 		headers_json: "{}".to_string(),
 		env_params_json: "[]".to_string(),
+		fetch_options_json: "{}".to_string(),
 	}
 }
 
@@ -53,15 +54,18 @@ fn settings_crud() {
 fn moderator_management() {
 	let db = open_test_db();
 
-	db.add_moderator(111, None, 999).unwrap();
-	assert!(db.is_moderator(111, None).unwrap());
+	db.add_server(1, "test").unwrap();
+	assert!(db.add_moderator(111, None, 999).is_err());
+	db.add_moderator(111, Some(1), 999).unwrap();
+	assert!(db.is_moderator(111, Some(1)).unwrap());
+	assert!(!db.is_moderator(111, Some(2)).unwrap());
 	assert!(!db.is_moderator(222, None).unwrap());
 
 	db.add_moderator(333, Some(1), 999).unwrap();
 	assert!(db.is_moderator(333, Some(1)).unwrap());
 
-	db.remove_moderator(111, None).unwrap();
-	assert!(!db.is_moderator(111, None).unwrap());
+	db.remove_moderator(111, Some(1)).unwrap();
+	assert!(!db.is_moderator(111, Some(1)).unwrap());
 }
 
 #[test]
@@ -197,6 +201,11 @@ fn art_history_prune_per_channel() {
 fn server_tag_whitelist_management() {
 	let db = open_test_db();
 	db.add_server(1, "test").unwrap();
+	db.add_booru(&test_booru("demo")).unwrap();
+	for tag in ["tag_a", "tag_b"] {
+		db.add_tag_pattern(tag, "demo", &["solo".into()], &[])
+			.unwrap();
+	}
 
 	assert!(db.get_server_tags(1).unwrap().is_empty());
 	assert_eq!(db.count_server_tag_whitelist().unwrap(), 0);
@@ -210,4 +219,168 @@ fn server_tag_whitelist_management() {
 
 	db.remove_server_tag(1, "tag_a").unwrap();
 	assert_eq!(db.get_server_tags(1).unwrap(), vec!["tag_b".to_string()]);
+}
+
+#[test]
+fn legacy_count_column_migrates_without_losing_patterns() {
+	let db = open_test_db();
+	let sql: String = db
+		.connection()
+		.query_row(
+			"SELECT sql FROM sqlite_master WHERE name='boorus'",
+			[],
+			|r| r.get(0),
+		)
+		.unwrap();
+	db.connection()
+		.execute_batch("DROP TABLE boorus; PRAGMA user_version=0;")
+		.unwrap();
+	db.connection()
+		.execute_batch(&sql.replace("count_url TEXT,", "count_url TEXT NOT NULL,"))
+		.unwrap();
+	db.add_booru(&test_booru("demo")).unwrap();
+	db.add_tag_pattern("solo", "demo", &["solo".into()], &[])
+		.unwrap();
+	super::initialize_schema(db.connection()).unwrap();
+	let mut row = db.get_booru_by_name("demo").unwrap().unwrap();
+	row.count_url = None;
+	db.update_booru(&row).unwrap();
+	assert!(
+		db.get_booru_by_name("demo")
+			.unwrap()
+			.unwrap()
+			.count_url
+			.is_none()
+	);
+	assert_eq!(db.get_tag_patterns(Some("solo")).unwrap().len(), 1);
+	super::initialize_schema(db.connection()).unwrap();
+}
+
+#[test]
+fn cleanup_handles_orphan_parent_and_child_rows_in_one_pass() {
+	let db = open_test_db();
+	db.connection()
+		.execute_batch(
+			"PRAGMA foreign_keys=OFF;
+	INSERT INTO channels(guild_id,channel_id) VALUES(99,10);
+	INSERT INTO server_tag_whitelist VALUES(99,'demo');
+	INSERT INTO channel_patterns VALUES(99,10,'demo');
+	PRAGMA foreign_keys=ON;",
+		)
+		.unwrap();
+	assert_eq!(db.check_and_clean().unwrap(), 3);
+	assert!(!db.has_channel(99, 10).unwrap());
+}
+
+#[test]
+fn invalid_filter_data_aborts_cleanup_and_rolls_back() {
+	let db = open_test_db();
+	db.add_server(1, "test").unwrap();
+	db.connection()
+		.execute_batch(
+			"PRAGMA foreign_keys=OFF;
+	INSERT INTO tag_pattern_entries(pattern_id,tag) VALUES(99,'orphan');
+	INSERT INTO channels(guild_id,channel_id,banned_tags) VALUES(1,10,'[\"blocked\",123]');
+	PRAGMA foreign_keys=ON;",
+		)
+		.unwrap();
+	assert!(db.check_and_clean().is_err());
+	let remaining: i64 = db
+		.connection()
+		.query_row("SELECT COUNT(*) FROM tag_pattern_entries", [], |r| r.get(0))
+		.unwrap();
+	assert_eq!(remaining, 1);
+	assert!(db.get_channel_config(1, 10).is_err());
+}
+
+#[test]
+fn normalization_collisions_and_invalid_provider_values_are_rejected() {
+	let db = open_test_db();
+	let mut row = test_booru("demo");
+	row.page_size = 0;
+	assert!(db.add_booru(&row).is_err());
+	row.page_size = 100;
+	row.max_tags = 26;
+	assert!(db.add_booru(&row).is_err());
+	row.max_tags = 9;
+	db.add_booru(&row).unwrap();
+	db.add_tag_pattern("blue archive", "demo", &["blue_archive".into()], &[])
+		.unwrap();
+	assert!(
+		db.add_tag_pattern("blue_archive", "demo", &["solo".into()], &[])
+			.is_err()
+	);
+	assert!(
+		db.add_tag_pattern("administrate", "demo", &["solo".into()], &[])
+			.is_err()
+	);
+}
+
+#[test]
+fn persistent_dm_references_survive_reopen_and_expire_with_history() {
+	use crate::{
+		app::post_cache::{CachedPost, PostCache},
+		booru::ImageResult,
+	};
+	use std::sync::{Arc, Mutex};
+	let db = Arc::new(Mutex::new(open_test_db()));
+	let cache = PostCache::new(Arc::clone(&db));
+	let id = cache
+		.store(
+			CachedPost {
+				image: ImageResult {
+					image_url: "https://test/1.jpg".into(),
+					post_url: Some("https://test/1".into()),
+					upstream_source_url: None,
+				},
+				booru_name: "demo".into(),
+				embed_image: false,
+			},
+			10,
+		)
+		.unwrap();
+	{
+		let db = db.lock().unwrap();
+		db.register_art("https://test/1", 10, Some(1), Some("demo"))
+			.unwrap();
+		db.link_delivered_post(&id, "https://test/1", 10).unwrap();
+	}
+	drop(cache);
+	let cache = PostCache::new(Arc::clone(&db));
+	assert!(cache.get(&id, 10).unwrap().is_some());
+	assert!(cache.get(&id, 11).unwrap().is_none());
+	for n in 2..=4 {
+		db.lock()
+			.unwrap()
+			.register_art(&format!("https://test/{n}"), 10, Some(1), Some("demo"))
+			.unwrap();
+	}
+	assert!(cache.get(&id, 10).unwrap().is_none());
+}
+
+#[test]
+fn channel_update_preserves_its_blacklist_and_normalizes_tags() {
+	let db = open_test_db();
+	db.add_server(1, "test").unwrap();
+	db.add_booru(&test_booru("demo")).unwrap();
+	db.add_tag_pattern("solo", "demo", &["solo".into()], &[])
+		.unwrap();
+	db.add_server_tag(1, "solo").unwrap();
+	let mut config = super::ChannelConfig {
+		guild_id: 1,
+		channel_id: 10,
+		language: None,
+		banned_tags: vec![" Blocked ".into()],
+	};
+	db.set_channel_config(&config).unwrap();
+	db.add_channel_pattern(1, 10, "solo").unwrap();
+	config.language = Some("fr".into());
+	db.set_channel_config(&config).unwrap();
+	assert_eq!(db.get_channel_patterns(1, 10).unwrap(), vec!["solo"]);
+	assert_eq!(
+		db.get_channel_config(1, 10).unwrap().unwrap().banned_tags,
+		vec!["blocked"]
+	);
+	db.remove_server_tag(1, "solo").unwrap();
+	assert!(db.get_channel_patterns(1, 10).unwrap().is_empty());
 }

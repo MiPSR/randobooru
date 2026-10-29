@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::db::BooruRow;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BooruConfig {
 	pub name: String,
@@ -32,6 +32,39 @@ pub struct BooruConfig {
 	pub detail_source_url_path: Vec<JsonPathSegment>,
 	pub headers: HashMap<String, String>,
 	pub env_params: Vec<EnvParamConfig>,
+	#[serde(default)]
+	pub fetch_options: FetchOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FetchOptions {
+	/// Additional exact origins allowed to receive the configured API headers.
+	pub trusted_image_origins: Vec<String>,
+	/// Paths relative to a post (or its detail document) containing tag data.
+	pub tag_paths: Vec<Vec<JsonPathSegment>>,
+}
+
+impl Default for FetchOptions {
+	fn default() -> Self {
+		Self {
+			trusted_image_origins: Vec::new(),
+			tag_paths: [
+				"tags",
+				"tag_string",
+				"tag_string_general",
+				"tag_string_character",
+				"tag_string_copyright",
+				"tag_string_artist",
+				"tag_string_meta",
+				"tag_string_species",
+				"tag_names",
+			]
+			.into_iter()
+			.map(|key| vec![JsonPathSegment::Key(key.into())])
+			.collect(),
+		}
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,7 +113,7 @@ pub struct EnvParamConfig {
 
 impl BooruConfig {
 	pub fn from_row(row: &BooruRow) -> Result<Self> {
-		Ok(Self {
+		let config = Self {
 			name: row.name.clone(),
 			embed_image: row.embed_image,
 			max_tags: row.max_tags,
@@ -113,10 +146,80 @@ impl BooruConfig {
 				.context("failed to parse headers_json")?,
 			env_params: serde_json::from_str(&row.env_params_json)
 				.context("failed to parse env_params_json")?,
-		})
+			fetch_options: serde_json::from_str(&row.fetch_options_json)
+				.context("invalid fetch options")?,
+		};
+		config.validate()?;
+		Ok(config)
 	}
 
-	#[cfg(test)]
+	pub fn validate(&self) -> Result<()> {
+		ensure!(
+			!crate::app::discord_name_component(&self.name).is_empty(),
+			"provider name must contain letters or digits"
+		);
+		validate_command_name(&crate::app::custom_command_name(&self.name))?;
+		ensure!(
+			(1..=1000).contains(&self.page_size),
+			"page_size must be 1..1000"
+		);
+		ensure!(self.max_tags <= 25, "max_tags must be 0..25");
+		ensure!(self.page_base <= 1_000_000, "page_base is too large");
+		ensure!(self.pace_ms <= 60_000, "pace_ms must be at most 60000");
+		ensure!(
+			!self.character_space_replacement.is_empty(),
+			"character_space_replacement cannot be empty"
+		);
+		for template in std::iter::once(&self.posts_url)
+			.chain(self.count_url.iter())
+			.chain(self.detail_url.iter())
+			.chain(self.post_url.iter())
+		{
+			let url = reqwest::Url::parse(template).context("invalid URL template")?;
+			ensure!(
+				matches!(url.scheme(), "https" | "http") && url.host_str().is_some(),
+				"URLs must use HTTP(S)"
+			);
+			ensure!(
+				url.username().is_empty() && url.password().is_none(),
+				"put URL credentials in custom parameters instead"
+			);
+		}
+		for origin in &self.fetch_options.trusted_image_origins {
+			let url = reqwest::Url::parse(origin).context("invalid trusted image origin")?;
+			ensure!(
+				matches!(url.scheme(), "https" | "http")
+					&& url.origin().ascii_serialization() == *origin,
+				"trusted image entries must be exact origins, e.g. https://images.example.org"
+			);
+		}
+		let mut names = std::collections::HashSet::new();
+		for param in &self.env_params {
+			ensure!(
+				!param.placeholder.is_empty()
+					&& param
+						.placeholder
+						.chars()
+						.all(|c| c.is_ascii_alphanumeric() || c == '_'),
+				"invalid placeholder"
+			);
+			ensure!(
+				!["tags", "page", "limit", "id"].contains(&param.placeholder.as_str())
+					&& names.insert(&param.placeholder),
+				"duplicate or reserved placeholder"
+			);
+		}
+		for (name, value) in &self.headers {
+			reqwest::header::HeaderName::from_bytes(name.as_bytes())
+				.context("invalid configured header name")?;
+			ensure!(
+				!value.contains(['\r', '\n']),
+				"header values cannot contain newlines"
+			);
+		}
+		Ok(())
+	}
+
 	pub fn to_row(&self) -> Result<BooruRow> {
 		Ok(BooruRow {
 			id: 0,
@@ -155,15 +258,32 @@ impl BooruConfig {
 				.context("failed to serialize headers")?,
 			env_params_json: serde_json::to_string(&self.env_params)
 				.context("failed to serialize env_params")?,
+			fetch_options_json: serde_json::to_string(&self.fetch_options)?,
 		})
 	}
+}
+
+pub fn validate_command_name(name: &str) -> Result<()> {
+	ensure!(
+		(1..=32).contains(&name.len())
+			&& name
+				.bytes()
+				.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-'),
+		"slash command names must normalize to 1..32 ASCII letters, digits or hyphens"
+	);
+	Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn test_booru() -> BooruConfig {
+	tests::test_booru("test")
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 
-	fn test_booru(name: &str) -> BooruConfig {
+	pub(super) fn test_booru(name: &str) -> BooruConfig {
 		BooruConfig {
 			name: name.to_string(),
 			embed_image: false,
@@ -189,6 +309,7 @@ mod tests {
 			detail_source_url_path: vec![],
 			headers: HashMap::new(),
 			env_params: vec![],
+			fetch_options: FetchOptions::default(),
 		}
 	}
 

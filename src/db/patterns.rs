@@ -12,8 +12,6 @@ pub struct TagPattern {
 
 #[derive(Debug, Clone)]
 pub struct TagPatternEntry {
-	pub id: i64,
-	pub pattern_id: i64,
 	pub tag: String,
 	pub is_excluded: bool,
 }
@@ -26,6 +24,53 @@ impl Database {
 		included_tags: &[String],
 		excluded_tags: &[String],
 	) -> Result<()> {
+		let normalized = crate::app::discord_name_component(name);
+		crate::config::validate_command_name(&normalized)?;
+		for lang in crate::i18n::I18n::available_languages() {
+			anyhow::ensure!(
+				crate::i18n::I18n::load(lang)?
+					.pattern_command_description(name)
+					.chars()
+					.count() <= 100,
+				"pattern name makes its slash-command description too long"
+			);
+		}
+		anyhow::ensure!(
+			![
+				"administrate",
+				"art-history",
+				"reload",
+				"booru-test",
+				"tag-test"
+			]
+			.contains(&normalized.as_str()),
+			"reserved command name"
+		);
+		anyhow::ensure!(
+			included_tags.iter().any(|t| !t.trim().is_empty()),
+			"at least one included tag is required"
+		);
+		anyhow::ensure!(
+			included_tags.len() <= 25
+				&& excluded_tags.len() <= 100
+				&& included_tags
+					.iter()
+					.chain(excluded_tags)
+					.all(|t| t.chars().count() <= 256),
+			"too many or oversized pattern tags"
+		);
+		for other in self.get_unique_pattern_names()? {
+			anyhow::ensure!(
+				other == name || crate::app::discord_name_component(&other) != normalized,
+				"tag command name collision"
+			);
+		}
+		for booru in self.get_all_boorus()? {
+			anyhow::ensure!(
+				crate::app::custom_command_name(&booru.name) != normalized,
+				"tag command collides with provider command"
+			);
+		}
 		let booru = self
 			.get_booru_by_name(booru_name)?
 			.ok_or_else(|| anyhow::anyhow!("booru {booru_name} not found"))?;
@@ -77,6 +122,12 @@ impl Database {
 			.context("failed to insert excluded tag")?;
 		}
 
+		for guild in self.get_validated_servers()? {
+			self.validate_guild_capacity(
+				&self.get_all_boorus()?,
+				&self.get_server_tags(guild.guild_id)?,
+			)?;
+		}
 		tx.commit().context("failed to commit tag pattern")?;
 		Ok(())
 	}
@@ -213,8 +264,6 @@ fn read_tag_pattern(row: &Row<'_>) -> rusqlite::Result<TagPattern> {
 
 fn read_tag_pattern_entry(row: &Row<'_>) -> rusqlite::Result<TagPatternEntry> {
 	Ok(TagPatternEntry {
-		id: row.get(0)?,
-		pattern_id: row.get(1)?,
 		tag: row.get(2)?,
 		is_excluded: row.get::<_, i64>(3)? != 0,
 	})

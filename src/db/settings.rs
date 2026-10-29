@@ -19,6 +19,7 @@ impl Database {
 	}
 
 	pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+		crate::settings::validate(key, value)?;
 		self.connection()
 			.execute(
 				"INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",

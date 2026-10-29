@@ -5,6 +5,17 @@ use super::Database;
 
 impl Database {
 	pub fn add_server_tag(&self, guild_id: i64, tag_name: &str) -> Result<()> {
+		anyhow::ensure!(
+			self.get_unique_pattern_names()?
+				.iter()
+				.any(|name| name == tag_name),
+			"tag name must match an existing pattern"
+		);
+		let mut tags = self.get_server_tags(guild_id)?;
+		if !tags.iter().any(|name| name == tag_name) {
+			tags.push(tag_name.into());
+		}
+		self.validate_guild_capacity(&self.get_all_boorus()?, &tags)?;
 		self.connection()
 			.execute(
 				"INSERT OR IGNORE INTO server_tag_whitelist (guild_id, tag_name) VALUES (?1, ?2)",
@@ -15,12 +26,17 @@ impl Database {
 	}
 
 	pub fn remove_server_tag(&self, guild_id: i64, tag_name: &str) -> Result<()> {
-		self.connection()
-			.execute(
-				"DELETE FROM server_tag_whitelist WHERE guild_id = ?1 AND tag_name = ?2",
-				params![guild_id, tag_name],
-			)
-			.context("failed to remove server tag")?;
+		let tx = self.connection().unchecked_transaction()?;
+		tx.execute(
+			"DELETE FROM channel_patterns WHERE guild_id=?1 AND pattern_name=?2",
+			params![guild_id, tag_name],
+		)?;
+		tx.execute(
+			"DELETE FROM server_tag_whitelist WHERE guild_id = ?1 AND tag_name = ?2",
+			params![guild_id, tag_name],
+		)
+		.context("failed to remove server tag")?;
+		tx.commit()?;
 		Ok(())
 	}
 

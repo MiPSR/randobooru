@@ -66,6 +66,16 @@ impl Database {
 		Ok(true)
 	}
 
+	pub fn link_delivered_post(
+		&self,
+		reference: &str,
+		source: &str,
+		channel_id: i64,
+	) -> Result<()> {
+		self.connection().execute("UPDATE delivered_posts SET art_id=(SELECT id FROM art_history WHERE source_link=?1 AND channel_id=?2) WHERE id=?3", params![source,channel_id,reference])?;
+		Ok(())
+	}
+
 	pub fn art_history_exists(&self, source_link: &str, channel_id: i64) -> Result<bool> {
 		let count: i64 = self
 			.connection()

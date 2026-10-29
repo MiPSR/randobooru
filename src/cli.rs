@@ -18,32 +18,23 @@ pub fn booru_random(step: &str, result: impl ToString) {
 	));
 }
 
-pub fn request(url: &str) {
-	line(format!("{} Request: {}", timestamp(), url));
+pub fn request(kind: &str) {
+	line(format!("{} Request: {}", timestamp(), normalize(kind)));
 }
 
-pub fn final_kept(booru_source: Option<&str>, external_source: Option<&str>, picture: &str) {
-	line(format!(
-		"Final selection (kept): {} {} {} {}",
-		timestamp(),
-		normalize_optional_str(booru_source),
-		normalize_optional_str(external_source),
-		normalize(picture)
-	));
+pub fn final_kept(_booru_source: Option<&str>, _external_source: Option<&str>, _picture: &str) {
+	line(format!("{} Image selected.", timestamp()));
 }
 
 pub fn final_kept_compressed(
-	booru_source: Option<&str>,
-	external_source: Option<&str>,
-	picture: &str,
+	_booru_source: Option<&str>,
+	_external_source: Option<&str>,
+	_picture: &str,
 	compression_time: &str,
 ) {
 	line(format!(
-		"Final selection (kept + compressed): {} {} {} {} Compressed in {}",
+		"{} Image selected; compressed in {}",
 		timestamp(),
-		normalize_optional_str(booru_source),
-		normalize_optional_str(external_source),
-		normalize(picture),
 		normalize(compression_time)
 	));
 }
@@ -93,10 +84,6 @@ pub fn db_cleaned(changes: usize) {
 		timestamp(),
 		plural(changes, "row")
 	));
-}
-
-pub fn commands_cleaned() {
-	line(format!("{} Commands cleaned.", timestamp()));
 }
 
 pub fn commands_pushed() {
@@ -161,10 +148,6 @@ fn normalize_i64(value: i64) -> String {
 
 fn normalize_option(value: Option<i64>) -> String {
 	value.map(normalize_i64).unwrap_or_else(|| "-".to_string())
-}
-
-fn normalize_optional_str(value: Option<&str>) -> String {
-	value.map(normalize).unwrap_or_else(|| "-".to_string())
 }
 
 fn normalize(value: &str) -> String {

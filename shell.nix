@@ -7,6 +7,8 @@ pkgs.mkShell {
 		clippy
 		rustc
 		rustfmt
+		pkg-config
+		openssl
 	];
 
 	RUST_BACKTRACE = "1";
